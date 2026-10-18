@@ -9,6 +9,16 @@ PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
 
 -- --------------------------------------------------------------------
+-- 0. SCHEMA MIGRATIONS TABLE
+-- Tracks versioned schema evolution across restarts & upgrades
+-- --------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- --------------------------------------------------------------------
 -- 1. ENTITIES (Unified People & Organizations)
 -- Leads, Customers, Vendors, Employees, Candidates
 -- --------------------------------------------------------------------
@@ -133,7 +143,7 @@ CREATE TABLE IF NOT EXISTS content_blocks (
     sentiment_label TEXT NOT NULL DEFAULT 'neutral' CHECK (sentiment_label IN ('positive', 'neutral', 'urgent_negative')),
     author_entity_id TEXT REFERENCES entities(id) ON DELETE SET NULL,
     parent_id TEXT REFERENCES content_blocks(id) ON DELETE CASCADE,
-    sync_status TEXT NOT NULL DEFAULT 'synced' CHECK (sync_status IN ('synced', 'pending', 'failed')),
+    sync_status TEXT NOT NULL DEFAULT 'synced' CHECK (sync_status IN ('synced', 'pending', 'failed', 'resolved')),
     metadata JSON NOT NULL DEFAULT '{}',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -188,13 +198,13 @@ CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_reverted ON audit_logs(is_reverted);
 
 -- --------------------------------------------------------------------
--- 8. SYSTEM CONFIG & RBAC KEYS
--- Scoped Agent API tokens and per-tool HITL enforcement toggles
+-- 8. SYSTEM CONFIG & RBAC KEYS (Cryptographically Hashed)
 -- --------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS agent_tokens (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    token TEXT UNIQUE NOT NULL,
+    token_hash TEXT UNIQUE NOT NULL,
+    token_prefix TEXT NOT NULL,
     scopes JSON NOT NULL DEFAULT '["*"]',
     rate_limit_per_min INTEGER NOT NULL DEFAULT 120,
     is_active INTEGER NOT NULL DEFAULT 1,
@@ -209,8 +219,24 @@ CREATE TABLE IF NOT EXISTS hitl_policies (
 );
 
 -- ====================================================================
--- AUTOMATED WORKFLOW TRIGGERS
+-- IMMUTABLE LEDGER & WORKFLOW TRIGGERS
 -- ====================================================================
+
+-- Enforce Ledger Immutability: Prevent UPDATE on posted ledger entries
+CREATE TRIGGER IF NOT EXISTS trg_ledger_immutable_update
+BEFORE UPDATE ON ledger_entries
+WHEN OLD.status = 'posted'
+BEGIN
+    SELECT RAISE(ABORT, 'Posted ledger entries are immutable. Create a reversing compensating journal entry instead.');
+END;
+
+-- Enforce Ledger Immutability: Prevent DELETE on posted ledger entries
+CREATE TRIGGER IF NOT EXISTS trg_ledger_immutable_delete
+BEFORE DELETE ON ledger_entries
+WHEN OLD.status = 'posted'
+BEGIN
+    SELECT RAISE(ABORT, 'Posted ledger entries are immutable and cannot be deleted.');
+END;
 
 -- Trigger: Automatically draft a Purchase Order in staged_actions
 -- when catalog_items stock falls to or below reorder_threshold
@@ -230,7 +256,7 @@ BEGIN
         status,
         created_at
     ) VALUES (
-        'stg_' || lower(hex(randomblob(6))),
+        'stg_' || lower(hex(randomblob(8))),
         'system:inventory_daemon',
         'erp_draft_purchase_order',
         json_object(
@@ -252,8 +278,13 @@ BEGIN
     );
 END;
 
+-- Mark Schema Migration Version 1
+INSERT OR REPLACE INTO schema_migrations (version, name) VALUES
+(1, 'initial_unified_schema_v2');
+
 -- ====================================================================
 -- SEED DATA (Enterprise Multi-Pillar Test Dataset)
+-- Note: Raw production secrets are NEVER stored in seed files.
 -- ====================================================================
 
 -- Default Tool HITL Policies
@@ -269,12 +300,6 @@ INSERT OR REPLACE INTO hitl_policies (tool_name, requires_hitl, risk_level, auto
 ('work_create_task', 0, 'low', NULL),
 ('docs_append_note', 0, 'low', NULL),
 ('reviews_fetch_unanswered', 0, 'low', NULL);
-
--- Default Agent Tokens
-INSERT OR REPLACE INTO agent_tokens (id, name, token, scopes, rate_limit_per_min, is_active) VALUES
-('tok_master', 'Admin Operator Key', 'bos_live_master_9942a', '["*"]', 1000, 1),
-('tok_support', 'Customer Support Agent', 'bos_agent_support_110a', '["crm:*", "reviews:*", "content:read"]', 200, 1),
-('tok_inventory', 'Supply Chain Daemon', 'bos_agent_supply_884b', '["inventory:*", "erp:*"]', 300, 1);
 
 -- 1. Entities
 INSERT OR REPLACE INTO entities (id, type, role, name, email, phone, status, metadata) VALUES
@@ -307,20 +332,24 @@ INSERT OR REPLACE INTO pipeline_states (id, category, title, stage, entity_id, a
 ('pip_app_marcus', 'candidate_application', 'Candidate Screening: Marcus Vance', 'offer', 'ent_cand_marcus', 'ent_emp_alex', 0.0, 'high', '2026-10-22 15:00:00', '{"proposed_comp": 175000, "interviews_completed": 4}');
 
 -- 4. Ledger Entries (Double-Entry Balance Records)
--- Transaction 1: Customer Invoice Payment received from Apex ($8,500)
+-- Transaction 1: Customer Invoice Payment received from Apex ($8,500 subtotal + $700 tax = $9,200 cash)
+-- Balanced Journal: Debit Cash $9,200 | Credit Revenue $8,500 | Credit Tax Payable $700
 INSERT OR REPLACE INTO ledger_entries (id, transaction_group_id, type, account, category, amount, tax_amount, currency, status, reference_id, entity_id, description) VALUES
-('led_101', 'tx_grp_inv_001', 'debit', 'cash', 'invoice', 8500.00, 0.0, 'USD', 'posted', 'INV-2026-089', 'ent_apex', 'Payment received - Apex Enterprise Platform Monthly'),
-('led_102', 'tx_grp_inv_001', 'credit', 'revenue', 'invoice', 8500.00, 700.0, 'USD', 'posted', 'INV-2026-089', 'ent_apex', 'SaaS Platform Revenue recognized');
+('led_101', 'tx_grp_inv_001', 'debit', 'cash', 'invoice', 9200.00, 0.0, 'USD', 'posted', 'INV-2026-089', 'ent_apex', 'Payment received - Apex Enterprise Platform Monthly (Incl Tax)'),
+('led_102', 'tx_grp_inv_001', 'credit', 'revenue', 'invoice', 8500.00, 0.0, 'USD', 'posted', 'INV-2026-089', 'ent_apex', 'SaaS Platform Revenue recognized'),
+('led_102b', 'tx_grp_inv_001', 'credit', 'tax_payable', 'invoice', 700.00, 0.0, 'USD', 'posted', 'INV-2026-089', 'ent_apex', 'Sales Tax collected payable');
 
 -- Transaction 2: Hardware Supplier Inventory Purchase ($5,500)
+-- Balanced Journal: Debit Inventory $5,500 | Credit Cash $5,500
 INSERT OR REPLACE INTO ledger_entries (id, transaction_group_id, type, account, category, amount, tax_amount, currency, status, reference_id, entity_id, description) VALUES
 ('led_103', 'tx_grp_bill_002', 'debit', 'inventory', 'bill', 5500.00, 0.0, 'USD', 'posted', 'PO-2026-044', 'ent_hyper', 'Inventory asset addition - Microservers Batch 4'),
 ('led_104', 'tx_grp_bill_002', 'credit', 'cash', 'bill', 5500.00, 0.0, 'USD', 'posted', 'PO-2026-044', 'ent_hyper', 'Direct vendor settlement');
 
 -- Transaction 3: Monthly Engineering Payroll ($14,500)
+-- Balanced Journal: Debit Payroll Expense $14,500 | Credit Cash $14,500
 INSERT OR REPLACE INTO ledger_entries (id, transaction_group_id, type, account, category, amount, tax_amount, currency, status, reference_id, entity_id, description) VALUES
 ('led_105', 'tx_grp_pay_003', 'debit', 'payroll_expense', 'payroll', 14500.00, 0.0, 'USD', 'posted', 'PAY-2026-OCT', 'ent_emp_alex', 'Monthly salary expense - Alex Mercer'),
-('led_106', 'tx_grp_pay_003', 'credit', 'cash', 'payroll', 14500.00, 2900.0, 'USD', 'posted', 'PAY-2026-OCT', 'ent_emp_alex', 'Payroll direct disbursement');
+('led_106', 'tx_grp_pay_003', 'credit', 'cash', 'payroll', 14500.00, 0.0, 'USD', 'posted', 'PAY-2026-OCT', 'ent_emp_alex', 'Payroll direct disbursement');
 
 -- 5. Content Blocks (Docs, Chats, Reviews, NAP Profile)
 -- Business NAP

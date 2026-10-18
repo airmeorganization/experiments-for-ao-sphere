@@ -10,14 +10,16 @@ WORKDIR /app
 # Install minimal system utilities for healthcheck
 RUN apk add --no-cache curl
 
-# Copy project files
-COPY package.json ./
-COPY schema.sql ./
-COPY server.ts ./
-COPY index.html ./
+# Create data directory and assign ownership to unprivileged bun user
+RUN mkdir -p /data && chown -R bun:bun /data /app
 
-# Create data directory for single-file SQLite database volume
-RUN mkdir -p /data && chmod 777 /data
+# Copy project files with proper ownership
+COPY --chown=bun:bun package.json ./
+COPY --chown=bun:bun schema.sql ./
+COPY --chown=bun:bun server.ts ./
+COPY --chown=bun:bun index.html ./
+
+USER bun
 
 # Default Environment Variables
 ENV NODE_ENV=production

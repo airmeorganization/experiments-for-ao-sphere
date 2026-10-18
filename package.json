@@ -1,12 +1,13 @@
 {
   "name": "bos-unified-operating-system",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Ultra-lightweight, zero-bloat, MCP-native Business Operating System combining ERP, CRM, Finance/HRMS, Productivity, and Digital Presence on 5 Unified SQLite Primitives.",
   "main": "server.ts",
   "type": "module",
   "scripts": {
     "start": "bun run server.ts",
     "dev": "bun --watch server.ts",
+    "test": "bun test tests/bos.test.ts",
     "mcp:stdio": "bun run server.ts --stdio",
     "test:order": "curl -X POST http://localhost:8080/api/webhooks/order -H 'Content-Type: application/json' -d '{\"customer_name\":\"Test Buyer\",\"customer_email\":\"buyer@test.io\",\"order_number\":\"9001\",\"total_amount\":1250,\"items\":[{\"sku\":\"HW-SRV-01\",\"quantity\":1}]}'"
   },

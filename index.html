@@ -12,6 +12,8 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <!-- DOMPurify for XSS Sanitization -->
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
 
   <script>
     tailwind.config = {
@@ -84,8 +86,14 @@
       </span>
     </button>
 
-    <!-- Right Quick Actions & System Status -->
+    <!-- Right Quick Actions & Authentication Status -->
     <div class="flex items-center gap-3">
+      <!-- Operator Token Config -->
+      <button onclick="promptSetOperatorToken()" title="Configure Operator API Token" class="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-surface-850 hover:bg-surface-800 border border-white/10 text-xs font-mono text-slate-300 transition">
+        <i data-lucide="key" class="w-3.5 h-3.5 text-amber-400"></i>
+        <span id="auth-status-label">Auth Token</span>
+      </button>
+
       <div class="hidden sm:flex items-center gap-2 text-xs text-slate-400 font-mono border-r border-white/10 pr-3">
         <span class="text-slate-400">MCP:</span>
         <span class="text-cyan-400">stdio / sse</span>
@@ -121,7 +129,7 @@
                 <span>Action Inbox</span>
               </span>
               <span id="badge-inbox-count" class="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-amber-500/20 text-amber-400 border border-amber-500/30">
-                3
+                0
               </span>
             </button>
 
@@ -176,7 +184,7 @@
           </div>
           <div class="flex items-center justify-between text-[11px]">
             <span class="text-slate-400">Ledger Verification</span>
-            <span class="text-purple-400 font-mono">Balanced</span>
+            <span class="text-purple-400 font-mono">Balanced Invariant</span>
           </div>
         </div>
 
@@ -185,7 +193,7 @@
       <!-- Left Rail Footer -->
       <div class="p-3 border-t border-white/5 text-[11px] text-slate-400 font-mono flex items-center justify-between">
         <span>SQLite WAL • 5 Primitives</span>
-        <span class="text-slate-400">v2.0</span>
+        <span class="text-slate-400">v2.1</span>
       </div>
     </aside>
 
@@ -225,7 +233,7 @@
               <div>
                 <h2 class="text-xs font-semibold text-rose-200">Critical Low Stock Detected</h2>
                 <p class="text-[11px] text-rose-300/80 mt-0.5" id="alert-low-stock-text">
-                  SKU <strong>HW-SRV-01</strong> (Edge Server) is at 4 units (Threshold: 10).
+                  SKU <strong>HW-SRV-01</strong> is below reorder threshold. Autonomous restock PO staged.
                 </p>
               </div>
             </div>
@@ -243,7 +251,7 @@
               <div>
                 <h2 class="text-xs font-semibold text-amber-200">Urgent Reputation Action Required</h2>
                 <p class="text-[11px] text-amber-300/80 mt-0.5" id="alert-urgent-review-text">
-                  Trustpilot 2-star review (-0.82 sentiment) regarding PO-2026-044. AI reply drafted.
+                  Trustpilot negative review (-0.82 sentiment) flagged. AI reply staged for sign-off.
                 </p>
               </div>
             </div>
@@ -257,7 +265,7 @@
         <div class="space-y-4">
           <div class="flex items-center justify-between text-xs text-slate-400 font-mono px-1">
             <span>STAGED AUTONOMOUS ACTIONS PENDING OPERATOR SIGN-OFF</span>
-            <span id="staged-queue-counter">3 pending</span>
+            <span id="staged-queue-counter">0 pending</span>
           </div>
 
           <div id="staged-actions-list" class="space-y-3">
@@ -270,7 +278,6 @@
       <!-- VIEW 2: UNIVERSAL CANVAS (PIPELINES & GRIDS) -->
       <!-- ============================================================== -->
       <section id="view-canvas" class="view-panel max-w-7xl mx-auto space-y-6 hidden">
-        <!-- Canvas Header & Dynamic Switchers -->
         <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-white/5 pb-4">
           <div>
             <h1 class="text-xl font-bold text-white tracking-tight flex items-center gap-2">
@@ -313,7 +320,6 @@
           </div>
         </div>
 
-        <!-- Dynamic Container for Kanban / Grid / Calendar -->
         <div id="canvas-content-container" class="min-h-[500px]">
           <!-- Injected via Javascript -->
         </div>
@@ -389,10 +395,10 @@
                 <span class="text-xs font-semibold text-white flex items-center gap-1.5">
                   <span class="text-slate-400">#</span> <span id="current-channel-title">general</span>
                 </span>
-                <span class="text-[11px] text-slate-400 font-mono">2 participants • SQLite synced</span>
+                <span class="text-[11px] text-slate-400 font-mono">SQLite WAL synced</span>
               </div>
               <div id="chat-messages-stream" class="flex-1 p-4 space-y-3 overflow-y-auto">
-                <!-- Chat messages injected here -->
+                <!-- Chat messages injected safely -->
               </div>
               <div class="p-3 border-t border-white/5 bg-surface-850/50">
                 <form onsubmit="sendChatMessage(event)" class="flex gap-2">
@@ -406,12 +412,9 @@
             <div id="doc-mode-container" class="flex-1 flex flex-col hidden p-6 overflow-y-auto">
               <div class="flex items-center justify-between pb-4 border-b border-white/5">
                 <h2 id="doc-title-display" class="text-lg font-bold text-white">Document Title</h2>
-                <button onclick="toggleDocEditMode()" class="px-3 py-1 rounded bg-surface-800 hover:bg-surface-700 text-xs text-slate-300 font-mono">
-                  Edit Markdown
-                </button>
               </div>
               <div id="doc-markdown-body" class="prose prose-invert prose-sm max-w-none mt-4 text-slate-300">
-                <!-- Rendered markdown preview -->
+                <!-- Safely sanitized markdown rendered here -->
               </div>
             </div>
           </div>
@@ -425,7 +428,7 @@
         <div>
           <h1 class="text-xl font-bold text-white tracking-tight flex items-center gap-2">
             Business Pulse Executive Dashboard
-            <span class="text-xs px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">Zero-Latency P&L</span>
+            <span class="text-xs px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">Balanced Invariant P&L</span>
           </h1>
           <p class="text-xs text-slate-400 mt-1">Real-time metrics aggregated directly from immutable double-entry ledger entries and pipeline states.</p>
         </div>
@@ -451,10 +454,10 @@
               <span>INVENTORY HEALTH</span>
               <i data-lucide="package" class="w-4 h-4 text-cyan-400"></i>
             </div>
-            <div id="kpi-inventory-health" class="text-2xl font-bold text-white tracking-tight">1 Low Stock</div>
+            <div id="kpi-inventory-health" class="text-2xl font-bold text-white tracking-tight">0 Low Stock</div>
             <div class="text-[11px] text-slate-400 flex items-center justify-between">
               <span>Auto-PO Trigger:</span>
-              <span class="text-emerald-400 font-mono">Online</span>
+              <span class="text-emerald-400 font-mono">Active</span>
             </div>
           </div>
 
@@ -464,10 +467,10 @@
               <span>PIPELINE VALUE</span>
               <i data-lucide="dollar-sign" class="w-4 h-4 text-purple-400"></i>
             </div>
-            <div id="kpi-pipeline-val" class="text-2xl font-bold text-purple-400 tracking-tight">$70,500.00</div>
+            <div id="kpi-pipeline-val" class="text-2xl font-bold text-purple-400 tracking-tight">$0.00</div>
             <div class="text-[11px] text-slate-400 flex items-center justify-between">
               <span>Active Deals:</span>
-              <span id="kpi-active-deals-count" class="font-mono text-slate-200">2 In Progress</span>
+              <span id="kpi-active-deals-count" class="font-mono text-slate-200">0 Active</span>
             </div>
           </div>
 
@@ -480,14 +483,13 @@
             <div id="kpi-reputation-score" class="text-2xl font-bold text-amber-400 tracking-tight">4.2 / 5.0</div>
             <div class="text-[11px] text-slate-400 flex items-center justify-between">
               <span>Urgent Negative:</span>
-              <span id="kpi-urgent-reviews-count" class="text-rose-400 font-mono font-semibold">1 Action Staged</span>
+              <span id="kpi-urgent-reviews-count" class="text-rose-400 font-mono font-semibold">0 Actions</span>
             </div>
           </div>
         </div>
 
         <!-- Financial Breakdown & Low-Stock Alerts Row -->
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <!-- Real-Time Double-Entry P&L Summary -->
           <div class="p-5 rounded-xl bg-surface-900 border border-white/5 space-y-4">
             <div class="flex items-center justify-between">
               <h2 class="text-xs font-semibold text-white uppercase tracking-wider font-mono">Double-Entry Financial Ledger</h2>
@@ -496,24 +498,19 @@
             <div class="space-y-2 text-xs">
               <div class="flex justify-between py-1.5 border-b border-white/5">
                 <span class="text-slate-400">Recognized Revenue (Invoices/E-com)</span>
-                <span id="ledger-revenue" class="font-mono text-white font-medium">$8,500.00</span>
+                <span id="ledger-revenue" class="font-mono text-white font-medium">$0.00</span>
               </div>
               <div class="flex justify-between py-1.5 border-b border-white/5">
                 <span class="text-slate-400">Operating & Payroll Expenses</span>
-                <span id="ledger-expenses" class="font-mono text-rose-400 font-medium">($14,500.00)</span>
-              </div>
-              <div class="flex justify-between py-1.5 border-b border-white/5">
-                <span class="text-slate-400">Inventory Asset Additions</span>
-                <span id="ledger-inventory" class="font-mono text-cyan-400 font-medium">$5,500.00</span>
+                <span id="ledger-expenses" class="font-mono text-rose-400 font-medium">$0.00</span>
               </div>
               <div class="flex justify-between py-2 font-semibold">
                 <span class="text-white">Net Cash Balance</span>
-                <span id="ledger-net-cash" class="font-mono text-emerald-400">$20,000.00</span>
+                <span id="ledger-net-cash" class="font-mono text-emerald-400">$0.00</span>
               </div>
             </div>
           </div>
 
-          <!-- Reputation & Review Sentiment Feed -->
           <div class="p-5 rounded-xl bg-surface-900 border border-white/5 space-y-4">
             <div class="flex items-center justify-between">
               <h2 class="text-xs font-semibold text-white uppercase tracking-wider font-mono">Customer Reputation Feed</h2>
@@ -540,7 +537,6 @@
 
         <!-- Connection Cards -->
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <!-- Stdio Config Card -->
           <div class="p-4 rounded-xl bg-surface-900 border border-white/5 space-y-3">
             <div class="flex items-center justify-between">
               <span class="text-xs font-semibold text-white flex items-center gap-2">
@@ -553,13 +549,12 @@
   "mcpServers": {
     "bos-unified": {
       "command": "bun",
-      "args": ["run", "/path/to/server.ts", "--stdio"]
+      "args": ["run", "server.ts", "--stdio"]
     }
   }
 }</pre>
           </div>
 
-          <!-- Remote SSE Config Card -->
           <div class="p-4 rounded-xl bg-surface-900 border border-white/5 space-y-3">
             <div class="flex items-center justify-between">
               <span class="text-xs font-semibold text-white flex items-center gap-2">
@@ -572,7 +567,7 @@
               <span>http://localhost:8080/mcp/sse</span>
               <span class="text-slate-400">HTTP/SSE</span>
             </div>
-            <p class="text-[11px] text-slate-400">Send tool call JSON-RPC packets via POST to <code class="text-slate-300">/mcp/messages?sessionId=...</code> with Bearer token authentication.</p>
+            <p class="text-[11px] text-slate-400">Authenticated via <code class="text-slate-300">Authorization: Bearer &lt;token&gt;</code> header on all tool calls.</p>
           </div>
         </div>
 
@@ -608,7 +603,7 @@
                   <th class="py-2 px-3">Audit ID</th>
                   <th class="py-2 px-3">Actor</th>
                   <th class="py-2 px-3">Tool / Action</th>
-                  <th class="py-2 px-3">Table (Target)</th>
+                  <th class="py-2 px-3">Table</th>
                   <th class="py-2 px-3">Action Type</th>
                   <th class="py-2 px-3">Timestamp</th>
                   <th class="py-2 px-3 text-right">Time-Travel</th>
@@ -629,7 +624,6 @@
   <!-- 360-DEGREE SLIDE-OVER DRAWER -->
   <!-- ==================================================================== -->
   <div id="slide-over-drawer" class="fixed inset-y-0 right-0 w-full max-w-lg bg-surface-900 border-l border-white/10 shadow-2xl z-50 transform translate-x-full transition-transform duration-300 ease-in-out flex flex-col">
-    <!-- Drawer Header -->
     <div class="p-5 border-b border-white/10 flex items-center justify-between bg-surface-850">
       <div class="flex items-center gap-3">
         <div id="drawer-avatar" class="w-9 h-9 rounded-full bg-brand-500/20 text-brand-400 flex items-center justify-center font-bold text-sm">
@@ -645,19 +639,17 @@
       </button>
     </div>
 
-    <!-- Drawer Content (Scrollable) -->
     <div class="flex-1 overflow-y-auto p-5 space-y-6 text-xs">
-      <!-- Contact Info -->
       <div class="space-y-2">
         <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider font-mono">Contact Details</span>
         <div class="p-3 rounded-lg bg-surface-950 border border-white/5 space-y-1.5 font-mono text-slate-300">
           <div class="flex justify-between">
             <span class="text-slate-400">Email:</span>
-            <span id="drawer-email" class="text-white">procurement@apexcorp.io</span>
+            <span id="drawer-email" class="text-white">None</span>
           </div>
           <div class="flex justify-between">
             <span class="text-slate-400">Phone:</span>
-            <span id="drawer-phone" class="text-white">+1-415-555-0199</span>
+            <span id="drawer-phone" class="text-white">None</span>
           </div>
           <div class="flex justify-between">
             <span class="text-slate-400">Status:</span>
@@ -666,20 +658,14 @@
         </div>
       </div>
 
-      <!-- Pipeline Deals & Orders -->
       <div class="space-y-2">
-        <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider font-mono">Pipeline States (Deals / Orders)</span>
-        <div id="drawer-pipeline-records" class="space-y-2">
-          <!-- Populated -->
-        </div>
+        <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider font-mono">Pipeline States</span>
+        <div id="drawer-pipeline-records" class="space-y-2"></div>
       </div>
 
-      <!-- Financial Ledger History -->
       <div class="space-y-2">
-        <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider font-mono">Ledger History (Debits / Credits)</span>
-        <div id="drawer-financial-records" class="space-y-2 font-mono text-[11px]">
-          <!-- Populated -->
-        </div>
+        <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider font-mono">Ledger History</span>
+        <div id="drawer-financial-records" class="space-y-2 font-mono text-[11px]"></div>
       </div>
     </div>
   </div>
@@ -696,7 +682,6 @@
       </div>
 
       <div id="omni-results-container" class="max-h-80 overflow-y-auto p-2 space-y-1 text-xs">
-        <!-- Quick Commands -->
         <div class="px-2 py-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wider font-mono">Navigation & Views</div>
         <button onclick="switchView('inbox'); closeOmniBar();" class="w-full text-left px-3 py-2 rounded-lg hover:bg-surface-800 text-slate-200 flex items-center justify-between">
           <span class="flex items-center gap-2"><i data-lucide="inbox" class="w-3.5 h-3.5 text-amber-400"></i> Jump to Action Inbox</span>
@@ -710,22 +695,12 @@
           <span class="flex items-center gap-2"><i data-lucide="activity" class="w-3.5 h-3.5 text-emerald-400"></i> View Business Pulse</span>
           <span class="text-[10px] text-slate-400 font-mono">View 4</span>
         </button>
-
-        <div class="px-2 pt-2 py-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wider font-mono">AI Agent Tools & Actions</div>
-        <button onclick="quickAction('check_stock'); closeOmniBar();" class="w-full text-left px-3 py-2 rounded-lg hover:bg-surface-800 text-slate-200 flex items-center justify-between">
-          <span class="flex items-center gap-2"><i data-lucide="package-search" class="w-3.5 h-3.5 text-cyan-400"></i> Run Stock Check (inventory_check_stock)</span>
-          <span class="text-[10px] text-slate-400 font-mono">Auto Tool</span>
-        </button>
-        <button onclick="quickAction('draft_po'); closeOmniBar();" class="w-full text-left px-3 py-2 rounded-lg hover:bg-surface-800 text-slate-200 flex items-center justify-between">
-          <span class="flex items-center gap-2"><i data-lucide="shopping-cart" class="w-3.5 h-3.5 text-rose-400"></i> Stage Restock PO (erp_draft_purchase_order)</span>
-          <span class="text-[10px] text-rose-400 font-mono">HITL Tool</span>
-        </button>
       </div>
     </div>
   </dialog>
 
   <!-- ==================================================================== -->
-  <!-- JAVASCRIPT FRONTEND APPLICATION LOGIC -->
+  <!-- JAVASCRIPT FRONTEND APPLICATION LOGIC (XSS-Safe & Hardened Fetch) -->
   <!-- ==================================================================== -->
   <script>
     // State store
@@ -736,9 +711,72 @@
     let canvasItemsData = [];
     let activeChannel = '#general';
 
+    // ------------------------------------------------------------------
+    // XSS Sanitization & HTML Escaping Helper
+    // ------------------------------------------------------------------
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    // ------------------------------------------------------------------
+    // Shared Robust API Fetch Client with Auth Token & Error Handling
+    // ------------------------------------------------------------------
+    async function apiFetch(url, options = {}) {
+      options.headers = options.headers || {};
+      const token = localStorage.getItem('bos_operator_token');
+      if (token && !options.headers['Authorization']) {
+        options.headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      const res = await fetch(url, options);
+      if (!res.ok) {
+        let errMessage = `HTTP ${res.status}: ${res.statusText}`;
+        try {
+          const errJson = await res.json();
+          if (errJson && errJson.error) errMessage = errJson.error;
+        } catch (e) {}
+        throw new Error(errMessage);
+      }
+      return res.json();
+    }
+
+    function promptSetOperatorToken() {
+      const current = localStorage.getItem('bos_operator_token') || '';
+      const input = prompt("Enter Operator Bearer Token (found in server startup logs or generated via /api/tokens):", current);
+      if (input !== null) {
+        localStorage.setItem('bos_operator_token', input.trim());
+        updateAuthLabel();
+        notifyToast("Operator token saved in session.");
+        loadStagedActions();
+        loadBusinessPulse();
+        loadCanvasItems();
+        loadAuditLogs();
+      }
+    }
+
+    function updateAuthLabel() {
+      const token = localStorage.getItem('bos_operator_token');
+      const label = document.getElementById('auth-status-label');
+      if (!label) return;
+      if (token) {
+        label.textContent = `Token: ${token.substring(0, 6)}...`;
+        label.classList.add('text-emerald-400');
+      } else {
+        label.textContent = "Set Token";
+        label.classList.remove('text-emerald-400');
+      }
+    }
+
     // Initialize UI on load
     document.addEventListener('DOMContentLoaded', () => {
       lucide.createIcons();
+      updateAuthLabel();
       loadStagedActions();
       loadBusinessPulse();
       loadCanvasItems();
@@ -789,8 +827,7 @@
     // ------------------------------------------------------------------
     async function loadStagedActions() {
       try {
-        const res = await fetch('/api/staged-actions?status=pending');
-        const actions = await res.json();
+        const actions = await apiFetch('/api/staged-actions?status=pending');
         stagedActionsData = actions;
 
         const countBadge = document.getElementById('badge-inbox-count');
@@ -823,31 +860,31 @@
               <div class="flex items-center justify-between">
                 <div class="flex items-center gap-2">
                   <span class="text-[10px] font-mono px-2 py-0.5 rounded border ${riskColor} uppercase font-semibold">
-                    ${action.risk_level} RISK
+                    ${escapeHtml(action.risk_level)} RISK
                   </span>
-                  <span class="text-xs font-mono text-white font-medium">${action.tool_name}</span>
-                  <span class="text-[11px] text-slate-400 font-mono">by ${action.agent_id}</span>
+                  <span class="text-xs font-mono text-white font-medium">${escapeHtml(action.tool_name)}</span>
+                  <span class="text-[11px] text-slate-400 font-mono">by ${escapeHtml(action.agent_id)}</span>
                 </div>
                 <span class="text-[10px] font-mono text-slate-400">${new Date(action.created_at).toLocaleTimeString()}</span>
               </div>
 
-              <p class="text-xs text-slate-300">${action.reasoning}</p>
+              <p class="text-xs text-slate-300">${escapeHtml(action.reasoning)}</p>
 
               <!-- Proposed Payload Preview -->
               <div class="p-3 rounded-lg bg-surface-950 border border-white/5 text-[11px] font-mono text-slate-400 overflow-x-auto">
                 <span class="text-slate-400 text-[10px] block mb-1 uppercase">Proposed Autonomous Payload:</span>
-                <pre class="text-slate-200 leading-snug">${JSON.stringify(action.proposed_payload, null, 2)}</pre>
+                <pre class="text-slate-200 leading-snug">${escapeHtml(JSON.stringify(action.proposed_payload, null, 2))}</pre>
               </div>
 
               <!-- Action Buttons -->
               <div class="flex items-center justify-end gap-2 pt-1 border-t border-white/5">
-                <button onclick="rejectAction('${action.id}')" class="px-3 py-1.5 rounded-lg hover:bg-rose-500/10 text-rose-400 hover:border-rose-500/30 border border-transparent text-xs font-medium transition">
+                <button onclick="rejectAction('${escapeHtml(action.id)}')" class="px-3 py-1.5 rounded-lg hover:bg-rose-500/10 text-rose-400 hover:border-rose-500/30 border border-transparent text-xs font-medium transition">
                   Reject
                 </button>
-                <button onclick="editActionPrompt('${action.id}')" class="px-3 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-300 text-xs font-medium border border-white/5 transition">
+                <button onclick="editActionPrompt('${escapeHtml(action.id)}')" class="px-3 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-300 text-xs font-medium border border-white/5 transition">
                   Edit Payload
                 </button>
-                <button onclick="approveAction('${action.id}')" class="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-lg shadow-emerald-600/20 transition flex items-center gap-1.5">
+                <button onclick="approveAction('${escapeHtml(action.id)}')" class="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-lg shadow-emerald-600/20 transition flex items-center gap-1.5">
                   <i data-lucide="check" class="w-3.5 h-3.5"></i> Approve & Execute
                 </button>
               </div>
@@ -863,14 +900,13 @@
 
     async function approveAction(actionId) {
       try {
-        const res = await fetch(`/api/staged-actions/${actionId}/approve`, { method: 'POST' });
-        const result = await res.json();
+        await apiFetch(`/api/staged-actions/${actionId}/approve`, { method: 'POST' });
         notifyToast(`Action ${actionId} approved and executed successfully!`);
         loadStagedActions();
         loadBusinessPulse();
         loadAuditLogs();
       } catch (err) {
-        alert("Error approving action: " + err.message);
+        notifyToast("Approval failed: " + err.message, "error");
       }
     }
 
@@ -878,7 +914,7 @@
       const note = prompt("Optional rejection note for the agent:", "Parameter values invalid");
       if (note === null) return;
       try {
-        await fetch(`/api/staged-actions/${actionId}/reject`, {
+        await apiFetch(`/api/staged-actions/${actionId}/reject`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ note })
@@ -886,7 +922,7 @@
         notifyToast(`Action ${actionId} rejected.`);
         loadStagedActions();
       } catch (err) {
-        alert("Error rejecting action: " + err.message);
+        notifyToast("Rejection failed: " + err.message, "error");
       }
     }
 
@@ -898,7 +934,7 @@
 
       try {
         const updatedJson = JSON.parse(updatedStr);
-        fetch(`/api/staged-actions/${actionId}/edit`, {
+        apiFetch(`/api/staged-actions/${actionId}/edit`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ updated_payload: updatedJson })
@@ -906,9 +942,9 @@
           notifyToast(`Action ${actionId} edited and executed.`);
           loadStagedActions();
           loadAuditLogs();
-        });
+        }).catch(err => notifyToast(err.message, "error"));
       } catch (e) {
-        alert("Invalid JSON format.");
+        notifyToast("Invalid JSON format.", "error");
       }
     }
 
@@ -917,8 +953,7 @@
     // ------------------------------------------------------------------
     async function loadCanvasItems() {
       try {
-        const res = await fetch(`/api/canvas?category=${currentFilter}`);
-        canvasItemsData = await res.json();
+        canvasItemsData = await apiFetch(`/api/canvas?category=${currentFilter}`);
         renderCanvas();
       } catch (err) {
         console.error("Failed to load canvas items:", err);
@@ -968,9 +1003,7 @@
     }
 
     function renderKanban(container) {
-      // Default Kanban columns
-      const stages = ['lead', 'qualified', 'quoted', 'won', 'todo', 'in_progress', 'scheduled', 'posted'];
-      const activeStages = ['lead', 'qualified', 'quoted', 'won']; // primary focus
+      const activeStages = ['lead', 'qualified', 'quoted', 'won'];
 
       container.innerHTML = `
         <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -979,19 +1012,19 @@
             return `
               <div class="p-3 rounded-xl bg-surface-900 border border-white/5 space-y-3">
                 <div class="flex items-center justify-between text-xs font-mono uppercase text-slate-400 pb-2 border-b border-white/5">
-                  <span class="font-semibold text-white">${stage}</span>
+                  <span class="font-semibold text-white">${escapeHtml(stage)}</span>
                   <span class="text-[10px] px-1.5 py-0.2 rounded bg-surface-800">${items.length}</span>
                 </div>
                 <div class="space-y-2 min-h-[300px]">
                   ${items.map(item => `
-                    <div onclick="open360Drawer('${item.entity_id || item.supplier_entity_id || 'ent_apex'}')" class="p-3 rounded-lg bg-surface-850 hover:bg-surface-800 border border-white/5 hover:border-brand-500/30 transition cursor-pointer space-y-2">
+                    <div onclick="open360Drawer('${escapeHtml(item.entity_id || item.supplier_entity_id || 'ent_apex')}')" class="p-3 rounded-lg bg-surface-850 hover:bg-surface-800 border border-white/5 hover:border-brand-500/30 transition cursor-pointer space-y-2">
                       <div class="flex items-start justify-between">
-                        <span class="text-xs font-semibold text-white">${item.title || item.name || item.sku}</span>
+                        <span class="text-xs font-semibold text-white">${escapeHtml(item.title || item.name || item.sku)}</span>
                         ${item.amount ? `<span class="text-xs font-mono text-emerald-400">$${item.amount.toLocaleString()}</span>` : ''}
                       </div>
                       <div class="flex items-center justify-between text-[10px] text-slate-400 font-mono">
-                        <span>${item.entity_name || item.assignee_name || 'Unassigned'}</span>
-                        <span class="text-slate-400">${item.category || item.type || 'item'}</span>
+                        <span>${escapeHtml(item.entity_name || item.assignee_name || 'Unassigned')}</span>
+                        <span class="text-slate-400">${escapeHtml(item.category || item.type || 'item')}</span>
                       </div>
                     </div>
                   `).join('')}
@@ -1010,27 +1043,27 @@
             <thead class="border-b border-white/10 text-slate-400 font-mono text-[10px] uppercase">
               <tr>
                 <th class="py-3 px-4">Identifier / Title</th>
-                <th class="py-3 px-4">Category / Type</th>
+                <th class="py-3 px-4">Category</th>
                 <th class="py-3 px-4">Stage / Status</th>
-                <th class="py-3 px-4">Assigned / Entity</th>
-                <th class="py-3 px-4">Value / Qty</th>
+                <th class="py-3 px-4">Entity</th>
+                <th class="py-3 px-4">Value</th>
                 <th class="py-3 px-4 text-right">360 View</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-white/5 font-mono">
               ${canvasItemsData.map(item => `
                 <tr class="hover:bg-surface-850/50 transition">
-                  <td class="py-2.5 px-4 font-sans font-medium text-white">${item.title || item.name || item.sku}</td>
-                  <td class="py-2.5 px-4 text-slate-400">${item.category || item.type || 'record'}</td>
+                  <td class="py-2.5 px-4 font-sans font-medium text-white">${escapeHtml(item.title || item.name || item.sku)}</td>
+                  <td class="py-2.5 px-4 text-slate-400">${escapeHtml(item.category || item.type || 'record')}</td>
                   <td class="py-2.5 px-4">
-                    <span class="px-2 py-0.5 rounded bg-surface-800 text-[10px] text-cyan-400">${item.stage || item.status || 'active'}</span>
+                    <span class="px-2 py-0.5 rounded bg-surface-800 text-[10px] text-cyan-400">${escapeHtml(item.stage || item.status || 'active')}</span>
                   </td>
-                  <td class="py-2.5 px-4 text-slate-300">${item.entity_name || item.assignee_name || item.supplier_name || '—'}</td>
+                  <td class="py-2.5 px-4 text-slate-300">${escapeHtml(item.entity_name || item.assignee_name || item.supplier_name || '—')}</td>
                   <td class="py-2.5 px-4 text-emerald-400">
                     ${item.amount !== undefined ? `$${item.amount.toLocaleString()}` : (item.stock_qty !== undefined ? `${item.stock_qty} in stock` : '—')}
                   </td>
                   <td class="py-2.5 px-4 text-right">
-                    <button onclick="open360Drawer('${item.entity_id || item.supplier_entity_id || 'ent_apex'}')" class="p-1 rounded hover:bg-surface-800 text-brand-400">
+                    <button onclick="open360Drawer('${escapeHtml(item.entity_id || item.supplier_entity_id || 'ent_apex')}')" class="p-1 rounded hover:bg-surface-800 text-brand-400">
                       <i data-lucide="eye" class="w-4 h-4"></i>
                     </button>
                   </td>
@@ -1050,20 +1083,6 @@
           <p class="text-xs text-slate-400 max-w-md mx-auto">
             Employee shifts, project task delivery deadlines, and quarterly deal closes rendered on an active timeline.
           </p>
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-left font-mono text-xs max-w-3xl mx-auto pt-4">
-            <div class="p-3 rounded-lg bg-surface-950 border border-white/5">
-              <span class="text-slate-400 text-[10px]">OCT 20, 2026</span>
-              <p class="text-white mt-1">L3 On-Call Shift (Alex Mercer)</p>
-            </div>
-            <div class="p-3 rounded-lg bg-surface-950 border border-white/5">
-              <span class="text-slate-400 text-[10px]">OCT 25, 2026</span>
-              <p class="text-cyan-400 mt-1">MCP SSE Transport Upgrade Due</p>
-            </div>
-            <div class="p-3 rounded-lg bg-surface-950 border border-white/5">
-              <span class="text-slate-400 text-[10px]">NOV 15, 2026</span>
-              <p class="text-emerald-400 mt-1">Apex Expansion Deal Target Close</p>
-            </div>
-          </div>
         </div>
       `;
     }
@@ -1077,8 +1096,7 @@
       drawer.classList.remove('translate-x-full');
 
       try {
-        const res = await fetch(`/api/entities/${entityId}/360`);
-        const data = await res.json();
+        const data = await apiFetch(`/api/entities/${entityId}/360`);
         const ent = data.entity;
 
         document.getElementById('drawer-entity-name').textContent = ent.name;
@@ -1087,26 +1105,24 @@
         document.getElementById('drawer-phone').textContent = ent.phone || 'None';
         document.getElementById('drawer-status').textContent = ent.status;
 
-        // Populate pipeline records
         const pipeContainer = document.getElementById('drawer-pipeline-records');
         pipeContainer.innerHTML = data.pipeline_records.map(p => `
           <div class="p-2.5 rounded-lg bg-surface-950 border border-white/5 flex items-center justify-between">
             <div>
-              <span class="font-semibold text-white block">${p.title}</span>
-              <span class="text-[10px] text-slate-400 font-mono">${p.category} • Stage: ${p.stage}</span>
+              <span class="font-semibold text-white block">${escapeHtml(p.title)}</span>
+              <span class="text-[10px] text-slate-400 font-mono">${escapeHtml(p.category)} • Stage: ${escapeHtml(p.stage)}</span>
             </div>
             ${p.amount ? `<span class="font-mono text-emerald-400">$${p.amount.toLocaleString()}</span>` : ''}
           </div>
         `).join('') || '<div class="text-slate-400">No active pipeline records</div>';
 
-        // Populate ledger
         const ledgerContainer = document.getElementById('drawer-financial-records');
         ledgerContainer.innerHTML = data.financial_transactions.map(l => `
           <div class="p-2 rounded bg-surface-950 border border-white/5 flex items-center justify-between">
             <div>
-              <span class="${l.type === 'debit' ? 'text-cyan-400' : 'text-emerald-400'} font-semibold">${l.type.toUpperCase()}</span>
-              <span class="text-slate-300 ml-1">${l.account}</span>
-              <p class="text-[10px] text-slate-400 font-sans">${l.description}</p>
+              <span class="${l.type === 'debit' ? 'text-cyan-400' : 'text-emerald-400'} font-semibold">${escapeHtml(l.type.toUpperCase())}</span>
+              <span class="text-slate-300 ml-1">${escapeHtml(l.account)}</span>
+              <p class="text-[10px] text-slate-400 font-sans">${escapeHtml(l.description)}</p>
             </div>
             <span class="font-bold text-white">$${l.amount.toLocaleString()}</span>
           </div>
@@ -1124,26 +1140,25 @@
     }
 
     // ------------------------------------------------------------------
-    // Workplace Productivity: Docs & Channels
+    // Workplace Productivity: Docs & Channels (XSS-Safe & Sanitized)
     // ------------------------------------------------------------------
     async function loadChatMessages() {
       try {
-        const res = await fetch(`/api/content?type=chat_message&channel=${encodeURIComponent(activeChannel)}`);
-        const messages = await res.json();
+        const messages = await apiFetch(`/api/content?type=chat_message&channel=${encodeURIComponent(activeChannel)}`);
         const stream = document.getElementById('chat-messages-stream');
         if (!stream) return;
 
         stream.innerHTML = messages.map(m => `
           <div class="flex items-start gap-3 text-xs">
             <div class="h-6 w-6 rounded-full bg-brand-500/20 text-brand-400 flex items-center justify-center font-bold text-[10px]">
-              ${(m.author_name || 'OP').substring(0, 2).toUpperCase()}
+              ${escapeHtml((m.author_name || 'OP').substring(0, 2).toUpperCase())}
             </div>
             <div>
               <div class="flex items-center gap-2">
-                <span class="font-semibold text-white">${m.author_name || 'Operator'}</span>
+                <span class="font-semibold text-white">${escapeHtml(m.author_name || 'Operator')}</span>
                 <span class="text-[10px] text-slate-400 font-mono">${new Date(m.created_at).toLocaleTimeString()}</span>
               </div>
-              <p class="text-slate-300 mt-0.5">${m.markdown_body}</p>
+              <p class="text-slate-300 mt-0.5">${escapeHtml(m.markdown_body)}</p>
             </div>
           </div>
         `).join('');
@@ -1160,18 +1175,22 @@
       const text = input.value.trim();
       if (!text) return;
 
-      await fetch('/api/content', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          block_type: 'chat_message',
-          channel_or_source: activeChannel,
-          markdown_body: text,
-        })
-      });
+      try {
+        await apiFetch('/api/content', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            block_type: 'chat_message',
+            channel_or_source: activeChannel,
+            markdown_body: text,
+          })
+        });
 
-      input.value = '';
-      loadChatMessages();
+        input.value = '';
+        loadChatMessages();
+      } catch (err) {
+        notifyToast(err.message, "error");
+      }
     }
 
     function selectChannel(channel) {
@@ -1186,12 +1205,17 @@
       document.getElementById('chat-mode-container').classList.add('hidden');
       document.getElementById('doc-mode-container').classList.remove('hidden');
 
-      const res = await fetch('/api/content');
-      const blocks = await res.json();
-      const doc = blocks.find(b => b.id === docId);
-      if (doc) {
-        document.getElementById('doc-title-display').textContent = doc.title || 'Document';
-        document.getElementById('doc-markdown-body').innerHTML = marked.parse(doc.markdown_body);
+      try {
+        const blocks = await apiFetch('/api/content');
+        const doc = blocks.find(b => b.id === docId);
+        if (doc) {
+          document.getElementById('doc-title-display').textContent = doc.title || 'Document';
+          // Sanitize marked output through DOMPurify to guarantee zero XSS!
+          const cleanHtml = DOMPurify.sanitize(marked.parse(doc.markdown_body));
+          document.getElementById('doc-markdown-body').innerHTML = cleanHtml;
+        }
+      } catch (err) {
+        notifyToast(err.message, "error");
       }
     }
 
@@ -1218,30 +1242,26 @@
     // ------------------------------------------------------------------
     async function loadBusinessPulse() {
       try {
-        const res = await fetch('/api/pulse');
-        const pulse = await res.json();
+        const pulse = await apiFetch('/api/pulse');
 
-        // Update KPI Cards
         document.getElementById('kpi-net-pnl').textContent = `$${pulse.net_pnl.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
         document.getElementById('kpi-cash-balance').textContent = `$${pulse.cash_balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
         document.getElementById('kpi-inventory-health').textContent = `${pulse.low_stock_count} Low Stock`;
-        document.getElementById('kpi-urgent-reviews-count').textContent = `${pulse.urgent_reviews_count} Action Staged`;
+        document.getElementById('kpi-urgent-reviews-count').textContent = `${pulse.urgent_reviews_count} Actions`;
 
-        // Update Ledger card
         document.getElementById('ledger-revenue').textContent = `$${pulse.revenue.toLocaleString()}`;
         document.getElementById('ledger-expenses').textContent = `($${pulse.expenses.toLocaleString()})`;
         document.getElementById('ledger-net-cash').textContent = `$${pulse.cash_balance.toLocaleString()}`;
 
-        // Reviews Feed
         const feed = document.getElementById('pulse-reviews-feed');
         if (feed && pulse.urgent_reviews) {
           feed.innerHTML = pulse.urgent_reviews.map(r => `
             <div class="p-3 rounded-lg bg-surface-950 border border-white/5 space-y-1">
               <div class="flex items-center justify-between text-[11px]">
-                <span class="text-rose-400 font-mono font-semibold">${r.source.toUpperCase()}</span>
+                <span class="text-rose-400 font-mono font-semibold">${escapeHtml(r.source.toUpperCase())}</span>
                 <span class="text-rose-400 font-mono">Sentiment: ${r.sentiment}</span>
               </div>
-              <p class="text-xs text-white">${r.title}</p>
+              <p class="text-xs text-white">${escapeHtml(r.title)}</p>
             </div>
           `).join('') || '<div class="text-slate-400 text-xs">No negative reviews flagged.</div>';
         }
@@ -1255,19 +1275,18 @@
     // ------------------------------------------------------------------
     async function loadHitlPolicies() {
       try {
-        const res = await fetch('/api/tokens');
-        const data = await res.json();
+        const data = await apiFetch('/api/tokens');
         const grid = document.getElementById('hitl-policies-grid');
         if (!grid) return;
 
         grid.innerHTML = data.policies.map(p => `
           <div class="p-3 rounded-lg bg-surface-950 border border-white/5 flex items-center justify-between">
             <div>
-              <span class="text-xs font-mono text-white block">${p.tool_name}</span>
-              <span class="text-[10px] text-slate-400 font-mono">Risk: ${p.risk_level}</span>
+              <span class="text-xs font-mono text-white block">${escapeHtml(p.tool_name)}</span>
+              <span class="text-[10px] text-slate-400 font-mono">Risk: ${escapeHtml(p.risk_level)}</span>
             </div>
             <label class="relative inline-flex items-center cursor-pointer">
-              <input type="checkbox" onchange="toggleHitlPolicy('${p.tool_name}', this.checked)" ${p.requires_hitl ? 'checked' : ''} class="sr-only peer">
+              <input type="checkbox" onchange="toggleHitlPolicy('${escapeHtml(p.tool_name)}', this.checked)" ${p.requires_hitl ? 'checked' : ''} class="sr-only peer">
               <div class="w-8 h-4 bg-surface-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-600"></div>
             </label>
           </div>
@@ -1278,37 +1297,40 @@
     }
 
     async function toggleHitlPolicy(toolName, enabled) {
-      await fetch(`/api/hitl-policies/${toolName}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requires_hitl: enabled })
-      });
-      notifyToast(`HITL policy for ${toolName} updated: ${enabled ? 'Enforced' : 'Auto-Execute'}`);
+      try {
+        await apiFetch(`/api/hitl-policies/${toolName}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requires_hitl: enabled })
+        });
+        notifyToast(`HITL policy for ${toolName} updated: ${enabled ? 'Enforced' : 'Auto-Execute'}`);
+      } catch (err) {
+        notifyToast(err.message, "error");
+      }
     }
 
     async function loadAuditLogs() {
       try {
-        const res = await fetch('/api/audit-logs');
-        const logs = await res.json();
+        const logs = await apiFetch('/api/audit-logs');
         const tbody = document.getElementById('audit-logs-tbody');
         if (!tbody) return;
 
         tbody.innerHTML = logs.map(l => `
           <tr class="hover:bg-surface-850/50 transition ${l.is_reverted ? 'opacity-40 line-through' : ''}">
-            <td class="py-2 px-3 text-slate-400">${l.id}</td>
-            <td class="py-2 px-3 text-cyan-400">${l.actor_id}</td>
-            <td class="py-2 px-3 text-white font-medium">${l.tool_name}</td>
-            <td class="py-2 px-3 text-slate-300">${l.table_name}</td>
+            <td class="py-2 px-3 text-slate-400">${escapeHtml(l.id)}</td>
+            <td class="py-2 px-3 text-cyan-400">${escapeHtml(l.actor_id)}</td>
+            <td class="py-2 px-3 text-white font-medium">${escapeHtml(l.tool_name)}</td>
+            <td class="py-2 px-3 text-slate-300">${escapeHtml(l.table_name)}</td>
             <td class="py-2 px-3">
-              <span class="px-1.5 py-0.2 rounded text-[10px] ${l.action === 'INSERT' ? 'text-emerald-400 bg-emerald-500/10' : l.action === 'UPDATE' ? 'text-cyan-400 bg-cyan-500/10' : 'text-purple-400 bg-purple-500/10'}">${l.action}</span>
+              <span class="px-1.5 py-0.2 rounded text-[10px] ${l.action === 'INSERT' ? 'text-emerald-400 bg-emerald-500/10' : l.action === 'UPDATE' ? 'text-cyan-400 bg-cyan-500/10' : 'text-purple-400 bg-purple-500/10'}">${escapeHtml(l.action)}</span>
             </td>
             <td class="py-2 px-3 text-slate-400">${new Date(l.created_at).toLocaleTimeString()}</td>
             <td class="py-2 px-3 text-right">
-              ${!l.is_reverted && l.action !== 'ROLLBACK' ? `
-                <button onclick="rollbackAudit('${l.id}')" class="px-2 py-0.5 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-[10px] transition">
+              ${!l.is_reverted && l.action !== 'ROLLBACK' && l.table_name !== 'ledger_entries' ? `
+                <button onclick="rollbackAudit('${escapeHtml(l.id)}')" class="px-2 py-0.5 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-[10px] transition">
                   Undo Action
                 </button>
-              ` : '<span class="text-slate-400 text-[10px]">Reverted</span>'}
+              ` : '<span class="text-slate-400 text-[10px]">' + (l.is_reverted ? 'Reverted' : 'Protected') + '</span>'}
             </td>
           </tr>
         `).join('');
@@ -1318,20 +1340,17 @@
     }
 
     async function rollbackAudit(auditId) {
-      if (!confirm(`Trigger 1-click rollback for state modification ${auditId}?`)) return;
+      if (!confirm(`Trigger 1-click atomic rollback for audit state ${auditId}?`)) return;
       try {
-        const res = await fetch(`/api/audit-logs/${auditId}/rollback`, { method: 'POST' });
-        const data = await res.json();
-        if (data.success) {
-          notifyToast(data.message);
+        const res = await apiFetch(`/api/audit-logs/${auditId}/rollback`, { method: 'POST' });
+        if (res.success) {
+          notifyToast(res.message);
           loadAuditLogs();
           loadCanvasItems();
           loadBusinessPulse();
-        } else {
-          alert(data.error);
         }
       } catch (err) {
-        alert("Rollback failed: " + err.message);
+        notifyToast("Rollback failed: " + err.message, "error");
       }
     }
 
@@ -1353,7 +1372,6 @@
 
     function handleOmniSearch(query) {
       const q = query.toLowerCase();
-      // Simple filter demonstration
       const items = document.querySelectorAll('#omni-results-container button');
       items.forEach(btn => {
         if (btn.textContent.toLowerCase().includes(q)) {
@@ -1362,24 +1380,6 @@
           btn.style.display = 'none';
         }
       });
-    }
-
-    function quickAction(actionType) {
-      if (actionType === 'check_stock') {
-        switchView('canvas', 'inventory');
-        notifyToast("Inventory stock scan active.");
-      } else if (actionType === 'draft_po') {
-        fetch('/api/staged-actions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            sku: 'HW-SRV-01',
-            quantity: 10
-          })
-        });
-        switchView('inbox');
-        notifyToast("Restock PO staged for operator sign-off.");
-      }
     }
 
     function triggerQuickSync() {
@@ -1393,13 +1393,13 @@
       notifyToast("Configuration snippet copied to clipboard.");
     }
 
-    // Toast notifications
-    function notifyToast(msg) {
+    function notifyToast(msg, type = "info") {
       const toast = document.createElement('div');
-      toast.className = 'fixed bottom-5 right-5 px-4 py-2.5 rounded-lg bg-surface-800 border border-white/10 text-white text-xs font-mono shadow-2xl z-50 animate-bounce';
+      const borderColor = type === 'error' ? 'border-rose-500/40 text-rose-300' : 'border-white/10 text-white';
+      toast.className = `fixed bottom-5 right-5 px-4 py-2.5 rounded-lg bg-surface-800 border ${borderColor} text-xs font-mono shadow-2xl z-50 animate-bounce`;
       toast.textContent = msg;
       document.body.appendChild(toast);
-      setTimeout(() => toast.remove(), 3500);
+      setTimeout(() => toast.remove(), 4000);
     }
   </script>
 </body>

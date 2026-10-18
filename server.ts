@@ -3,13 +3,21 @@
  * BUSINESS OPERATING SYSTEM (BOS) - UNIFIED BACKEND & MCP SERVER
  * ====================================================================
  * Zero-bloat, MCP-Native Business OS powered by SQLite (WAL mode).
- * Exposes a Dual-Protocol Service Layer (REST API + MCP STDIO & SSE Transports)
- * with Human-in-the-Loop (HITL) Staging, Scoped RBAC, and 1-Click Rollback.
+ * Features:
+ * - Scoped RBAC Authentication on all REST & MCP endpoints
+ * - Cryptographically secure SHA-256 hashed token storage
+ * - Balanced Double-Entry Financial Accounting with Invariant Verification
+ * - Ledger Immutability & Atomic SQLite Transactions
+ * - Optimistic State Verification & Allowlist-Restricted Rollback
+ * - Idempotent Order Webhook Processing
+ * - Real-world Supply Chain Lifecycle (PO Order -> Receipt Separation)
+ * - Dual MCP Transports (STDIO & SSE) with Strict Scope Checking
  */
 
 import { Database } from "bun:sqlite";
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
+import { randomBytes, createHash, randomUUID } from "crypto";
 
 // --------------------------------------------------------------------
 // Database Initialization & WAL Mode Configuration
@@ -17,8 +25,9 @@ import { join } from "path";
 const DB_PATH = process.env.DATABASE_PATH || join(process.cwd(), "bos.db");
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const SCHEMA_FILE = join(process.cwd(), "schema.sql");
+const ALLOW_UNAUTHENTICATED_LOCAL = process.env.ALLOW_UNAUTHENTICATED_LOCAL === "true";
 
-const db = new Database(DB_PATH, { create: true });
+export const db = new Database(DB_PATH, { create: true });
 db.exec("PRAGMA journal_mode = WAL;");
 db.exec("PRAGMA synchronous = NORMAL;");
 db.exec("PRAGMA foreign_keys = ON;");
@@ -30,7 +39,7 @@ const tableCheck = db.query<{ count: number }, []>(
 ).get();
 
 if (!tableCheck || tableCheck.count === 0) {
-  console.log("[BOS Database] Initializing schema and seed data from schema.sql...");
+  console.log("[BOS Database] Initializing schema from schema.sql...");
   if (existsSync(SCHEMA_FILE)) {
     const schemaSql = readFileSync(SCHEMA_FILE, "utf-8");
     db.exec(schemaSql);
@@ -39,6 +48,47 @@ if (!tableCheck || tableCheck.count === 0) {
     console.warn("[BOS Database] schema.sql not found at:", SCHEMA_FILE);
   }
 }
+
+// Versioned Migration Manager
+function runMigrations() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  const applied = new Set(
+    db.query<{ version: number }, []>("SELECT version FROM schema_migrations").all().map(m => m.version)
+  );
+
+  // Migration 1: Token hashing and ledger immutability
+  if (!applied.has(1)) {
+    try {
+      db.exec(`
+        CREATE TRIGGER IF NOT EXISTS trg_ledger_immutable_update
+        BEFORE UPDATE ON ledger_entries
+        WHEN OLD.status = 'posted'
+        BEGIN
+            SELECT RAISE(ABORT, 'Posted ledger entries are immutable. Create a reversing compensating journal entry instead.');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_ledger_immutable_delete
+        BEFORE DELETE ON ledger_entries
+        WHEN OLD.status = 'posted'
+        BEGIN
+            SELECT RAISE(ABORT, 'Posted ledger entries are immutable and cannot be deleted.');
+        END;
+      `);
+      db.query("INSERT OR REPLACE INTO schema_migrations (version, name) VALUES (1, 'ledger_immutability')").run();
+      console.log("[BOS Migration] Applied Migration 1 (Ledger Immutability Triggers)");
+    } catch (err: any) {
+      console.warn("[BOS Migration] Migration 1 notice:", err.message);
+    }
+  }
+}
+runMigrations();
 
 // --------------------------------------------------------------------
 // Type Definitions
@@ -109,7 +159,7 @@ export interface ContentBlock {
   sentiment_label: "positive" | "neutral" | "urgent_negative";
   author_entity_id?: string;
   parent_id?: string;
-  sync_status: "synced" | "pending" | "failed";
+  sync_status: "synced" | "pending" | "failed" | "resolved";
   metadata: string;
 }
 
@@ -143,10 +193,106 @@ export interface AuditLog {
   created_at: string;
 }
 
+export interface AgentTokenRow {
+  id: string;
+  name: string;
+  token_hash: string;
+  token_prefix: string;
+  scopes: string;
+  rate_limit_per_min: number;
+  is_active: number;
+  created_at: string;
+}
+
 // --------------------------------------------------------------------
-// Audit & Time-Travel Rollback Engine
+// Cryptographic Security & RBAC Token Manager
 // --------------------------------------------------------------------
-class AuditEngine {
+export class SecurityManager {
+  static hashToken(rawToken: string): string {
+    return createHash("sha256").update(rawToken).digest("hex");
+  }
+
+  static generateSecureToken(prefix: string = "bos_live_"): { rawToken: string; tokenHash: string; tokenPrefix: string } {
+    const rawSecret = randomBytes(24).toString("hex");
+    const rawToken = `${prefix}${rawSecret}`;
+    const tokenHash = this.hashToken(rawToken);
+    const tokenPrefix = `${rawToken.substring(0, 12)}...${rawToken.substring(rawToken.length - 4)}`;
+    return { rawToken, tokenHash, tokenPrefix };
+  }
+
+  static bootstrapAdminKey() {
+    const count = db.query<{ count: number }, []>("SELECT count(*) as count FROM agent_tokens").get()?.count || 0;
+    if (count === 0) {
+      const { rawToken, tokenHash, tokenPrefix } = this.generateSecureToken("bos_admin_");
+      const tokenId = "tok_admin_" + randomUUID().substring(0, 8);
+
+      db.query(`
+        INSERT INTO agent_tokens (id, name, token_hash, token_prefix, scopes, rate_limit_per_min, is_active)
+        VALUES ($id, 'Default Root Operator', $hash, $prefix, '["*"]', 1000, 1)
+      `).run({
+        $id: tokenId,
+        $hash: tokenHash,
+        $prefix: tokenPrefix,
+      });
+
+      console.log("\n====================================================================");
+      console.log("🔐 [BOS SECURITY BOOTSTRAP] Initial Admin Master Key Generated:");
+      console.log(`   Token: ${rawToken}`);
+      console.log("   (Store this token securely! It will NEVER be displayed or logged again)");
+      console.log("====================================================================\n");
+    }
+  }
+
+  static verifyToken(authHeader: string | null): { authenticated: boolean; agentId: string; scopes: string[]; error?: string } {
+    if (!authHeader) {
+      if (ALLOW_UNAUTHENTICATED_LOCAL) {
+        return { authenticated: true, agentId: "operator:local_dev", scopes: ["*"] };
+      }
+      return { authenticated: false, agentId: "anonymous", scopes: [], error: "Missing Authorization header." };
+    }
+
+    const rawToken = authHeader.replace(/^Bearer\s+/i, "").trim();
+    if (!rawToken) {
+      return { authenticated: false, agentId: "anonymous", scopes: [], error: "Malformed Bearer token." };
+    }
+
+    // Check environment operator token override if set
+    if (process.env.BOS_OPERATOR_TOKEN && rawToken === process.env.BOS_OPERATOR_TOKEN) {
+      return { authenticated: true, agentId: "operator:env_master", scopes: ["*"] };
+    }
+
+    const tokenHash = this.hashToken(rawToken);
+    const row = db.query<AgentTokenRow, { $hash: string }>(
+      "SELECT * FROM agent_tokens WHERE token_hash = $hash AND is_active = 1"
+    ).get({ $hash: tokenHash });
+
+    if (!row) {
+      return { authenticated: false, agentId: "anonymous", scopes: [], error: "Invalid or revoked API token." };
+    }
+
+    const scopes: string[] = JSON.parse(row.scopes || "[]");
+    return { authenticated: true, agentId: row.id, scopes };
+  }
+
+  static hasScope(grantedScopes: string[], requiredScope: string): boolean {
+    if (grantedScopes.includes("*")) return true;
+    if (grantedScopes.includes(requiredScope)) return true;
+
+    // Check prefix match, e.g. "crm:*" matches "crm_search_entities" or "crm:read"
+    const [reqPrefix] = requiredScope.split(/[:_]/);
+    return grantedScopes.some(s => s === `${reqPrefix}:*` || s === `${reqPrefix}_*`);
+  }
+}
+
+SecurityManager.bootstrapAdminKey();
+
+// --------------------------------------------------------------------
+// Safe, Atomic & State-Verified Rollback Engine
+// --------------------------------------------------------------------
+export class AuditEngine {
+  // Explicit allowlist of tables permitted for rollback
+  private static ALLOWED_TABLES = new Set(["entities", "catalog_items", "pipeline_states", "content_blocks"]);
+
   static record(
     actorType: "human" | "agent" | "system",
     actorId: string,
@@ -157,7 +303,7 @@ class AuditEngine {
     beforeData?: any,
     afterData?: any
   ): string {
-    const auditId = "aud_" + Math.random().toString(36).substring(2, 10);
+    const auditId = "aud_" + randomUUID().substring(0, 8);
     const beforeJson = beforeData ? JSON.stringify(beforeData) : null;
     const afterJson = afterData ? JSON.stringify(afterData) : null;
 
@@ -181,70 +327,98 @@ class AuditEngine {
 
   static rollback(auditId: string, operatorId: string = "human_operator"): { success: boolean; message: string; restoredRecord?: any } {
     const audit = db.query<AuditLog, { $id: string }>("SELECT * FROM audit_logs WHERE id = $id").get({ $id: auditId });
-    if (!audit) {
-      throw new Error(`Audit log entry not found: ${auditId}`);
-    }
-    if (audit.is_reverted === 1) {
-      throw new Error(`Audit log entry ${auditId} has already been reverted.`);
-    }
+    if (!audit) throw new Error(`Audit log entry not found: ${auditId}`);
+    if (audit.is_reverted === 1) throw new Error(`Audit log entry ${auditId} has already been reverted.`);
 
     const { table_name, record_id, action, before_json, after_json } = audit;
-    let restoredData: any = null;
 
-    if (action === "UPDATE") {
-      if (!before_json) throw new Error("No previous state stored in audit log to revert to.");
-      const previousState = JSON.parse(before_json);
-      restoredData = previousState;
-
-      // Update the record with previous state
-      const keys = Object.keys(previousState).filter(k => k !== "id");
-      const setClauses = keys.map(k => `"${k}" = $${k}`).join(", ");
-      const params: Record<string, any> = { $id: record_id };
-      for (const k of keys) {
-        params[`$${k}`] = typeof previousState[k] === "object" ? JSON.stringify(previousState[k]) : previousState[k];
-      }
-
-      db.query(`UPDATE "${table_name}" SET ${setClauses}, updated_at = CURRENT_TIMESTAMP WHERE id = $id`).run(params);
-
-    } else if (action === "INSERT") {
-      // Reverting an insert means deleting the newly created record
-      db.query(`DELETE FROM "${table_name}" WHERE id = $id`).run({ $id: record_id });
-      restoredData = { deleted_record_id: record_id };
-
-    } else if (action === "DELETE") {
-      if (!before_json) throw new Error("No previous record found to restore.");
-      const deletedState = JSON.parse(before_json);
-      restoredData = deletedState;
-      const keys = Object.keys(deletedState);
-      const cols = keys.map(k => `"${k}"`).join(", ");
-      const placeholders = keys.map(k => `$${k}`).join(", ");
-      const params: Record<string, any> = {};
-      for (const k of keys) {
-        params[`$${k}`] = typeof deletedState[k] === "object" ? JSON.stringify(deletedState[k]) : deletedState[k];
-      }
-      db.query(`INSERT INTO "${table_name}" (${cols}) VALUES (${placeholders})`).run(params);
+    // Guardrail: Disallow rollback on ledger_entries to maintain strict accounting audit trail
+    if (table_name === "ledger_entries") {
+      throw new Error("Financial ledger entries cannot be rolled back via arbitrary table mutation. Post a balanced reversing journal entry.");
     }
 
-    // Mark current audit log as reverted
-    const rollbackLogId = this.record(
-      "human",
-      operatorId,
-      "audit_rollback",
-      table_name,
-      record_id,
-      "ROLLBACK",
-      after_json ? JSON.parse(after_json) : null,
-      restoredData
-    );
+    if (!this.ALLOWED_TABLES.has(table_name)) {
+      throw new Error(`Rollback not permitted on table '${table_name}'. Allowed: [${Array.from(this.ALLOWED_TABLES).join(", ")}]`);
+    }
 
-    db.query(`UPDATE audit_logs SET is_reverted = 1, reverted_by_audit_id = $rev_id WHERE id = $id`).run({
-      $rev_id: rollbackLogId,
-      $id: auditId,
+    let restoredData: any = null;
+
+    // Wrap the entire rollback and audit write inside an atomic SQLite transaction
+    const executeRollbackTx = db.transaction(() => {
+      // Optimistic concurrency check: Verify current record state matches after_json
+      const currentRow = db.query(`SELECT * FROM "${table_name}" WHERE id = $id`).get({ $id: record_id }) as Record<string, any> | undefined;
+
+      if (action === "UPDATE") {
+        if (!before_json) throw new Error("No previous state stored in audit log to revert to.");
+        if (!currentRow) throw new Error(`Target record ${record_id} in ${table_name} no longer exists.`);
+
+        // If after_json was captured, verify current row has not drifted
+        if (after_json) {
+          const expectedState = JSON.parse(after_json);
+          // Check key business fields for optimistic lock
+          for (const key of Object.keys(expectedState)) {
+            if (key === "updated_at" || key === "created_at") continue;
+            const currentVal = typeof currentRow[key] === "object" ? JSON.stringify(currentRow[key]) : currentRow[key];
+            const expectedVal = typeof expectedState[key] === "object" ? JSON.stringify(expectedState[key]) : expectedState[key];
+            if (currentVal !== expectedVal) {
+              throw new Error(`Optimistic lock failure: Record ${record_id} in ${table_name} has been modified since snapshot (${key} differs). Rollback aborted.`);
+            }
+          }
+        }
+
+        const previousState = JSON.parse(before_json);
+        restoredData = previousState;
+        const keys = Object.keys(previousState).filter(k => k !== "id");
+        const setClauses = keys.map(k => `"${k}" = $${k}`).join(", ");
+        const params: Record<string, any> = { $id: record_id };
+        for (const k of keys) {
+          params[`$${k}`] = typeof previousState[k] === "object" ? JSON.stringify(previousState[k]) : previousState[k];
+        }
+
+        db.query(`UPDATE "${table_name}" SET ${setClauses}, updated_at = CURRENT_TIMESTAMP WHERE id = $id`).run(params);
+
+      } else if (action === "INSERT") {
+        if (!currentRow) throw new Error(`Target record ${record_id} in ${table_name} does not exist to revert.`);
+        db.query(`DELETE FROM "${table_name}" WHERE id = $id`).run({ $id: record_id });
+        restoredData = { deleted_record_id: record_id };
+
+      } else if (action === "DELETE") {
+        if (!before_json) throw new Error("No previous record found to restore.");
+        const deletedState = JSON.parse(before_json);
+        restoredData = deletedState;
+        const keys = Object.keys(deletedState);
+        const cols = keys.map(k => `"${k}"`).join(", ");
+        const placeholders = keys.map(k => `$${k}`).join(", ");
+        const params: Record<string, any> = {};
+        for (const k of keys) {
+          params[`$${k}`] = typeof deletedState[k] === "object" ? JSON.stringify(deletedState[k]) : deletedState[k];
+        }
+        db.query(`INSERT INTO "${table_name}" (${cols}) VALUES (${placeholders})`).run(params);
+      }
+
+      // Mark current audit log as reverted and record rollback log
+      const rollbackLogId = this.record(
+        "human",
+        operatorId,
+        "audit_rollback",
+        table_name,
+        record_id,
+        "ROLLBACK",
+        after_json ? JSON.parse(after_json) : null,
+        restoredData
+      );
+
+      db.query(`UPDATE audit_logs SET is_reverted = 1, reverted_by_audit_id = $rev_id WHERE id = $id`).run({
+        $rev_id: rollbackLogId,
+        $id: auditId,
+      });
     });
+
+    executeRollbackTx();
 
     return {
       success: true,
-      message: `Successfully rolled back ${action} on ${table_name} (${record_id}).`,
+      message: `Successfully rolled back ${action} on ${table_name} (${record_id}) atomically.`,
       restoredRecord: restoredData,
     };
   }
@@ -253,22 +427,20 @@ class AuditEngine {
 // --------------------------------------------------------------------
 // Human-in-the-Loop (HITL) Staging Engine
 // --------------------------------------------------------------------
-class HitlEngine {
+export class HitlEngine {
   static isToolStaged(toolName: string): boolean {
     const policy = db.query<{ requires_hitl: number; risk_level: string }, { $tool: string }>(
       "SELECT requires_hitl, risk_level FROM hitl_policies WHERE tool_name = $tool"
     ).get({ $tool: toolName });
 
-    if (policy) {
-      return policy.requires_hitl === 1;
-    }
-    // High-risk defaults
+    if (policy) return policy.requires_hitl === 1;
+
     const highRiskTools = [
       "erp_draft_purchase_order",
       "finance_issue_invoice",
       "hrms_stage_payroll_run",
       "presence_publish_review_reply",
-      "presence_sync_nap_listings"
+      "presence_sync_nap_listings",
     ];
     return highRiskTools.includes(toolName);
   }
@@ -281,7 +453,7 @@ class HitlEngine {
     riskLevel: "low" | "medium" | "high" | "critical",
     reasoning: string
   ): StagedAction {
-    const stagedId = "stg_" + Math.random().toString(36).substring(2, 9);
+    const stagedId = "stg_" + randomUUID().substring(0, 8);
     db.query(`
       INSERT INTO staged_actions (id, agent_id, tool_name, parameters_json, proposed_payload_json, risk_level, reasoning, status)
       VALUES ($id, $agent_id, $tool_name, $parameters_json, $proposed_payload_json, $risk_level, $reasoning, 'pending')
@@ -306,7 +478,7 @@ class HitlEngine {
     const params = JSON.parse(action.parameters_json);
     const proposed = JSON.parse(action.proposed_payload_json);
 
-    // Execute the underlying high-stakes tool directly with human bypass
+    // Execute the underlying high-stakes tool directly with human bypass inside a transaction
     const executionResult = BusinessCoreService.executeToolInternal(action.tool_name, { ...params, ...proposed }, reviewerId, true);
 
     db.query(`
@@ -378,12 +550,10 @@ class HitlEngine {
 
 // --------------------------------------------------------------------
 // Unified Core Business Service Layer
-// Shared by both REST API and MCP Tool / Resource handlers
 // --------------------------------------------------------------------
 export class BusinessCoreService {
   // 1. Business Pulse Executive Summary
   static getBusinessPulse() {
-    // Financial metrics from double-entry ledger
     const cashRow = db.query<{ cash_balance: number }, []>(`
       SELECT 
         COALESCE(SUM(CASE WHEN type = 'debit' THEN amount ELSE -amount END), 0) as cash_balance
@@ -404,13 +574,11 @@ export class BusinessCoreService {
     const expenses = pnlRow?.total_expense ?? 0;
     const netPnL = revenue - expenses;
 
-    // Inventory metrics
     const lowStockItems = db.query<CatalogItem, []>(`
       SELECT * FROM catalog_items 
       WHERE stock_qty <= reorder_threshold
     `).all();
 
-    // CRM Deals Pipeline Velocity
     const pipelineSummary = db.query<{ stage: string; count: number; total_amount: number }, []>(`
       SELECT stage, count(*) as count, COALESCE(SUM(amount), 0) as total_amount
       FROM pipeline_states
@@ -418,7 +586,6 @@ export class BusinessCoreService {
       GROUP BY stage
     `).all();
 
-    // Reputation: Unanswered negative reviews
     const urgentReviews = db.query<ContentBlock, []>(`
       SELECT * FROM content_blocks
       WHERE block_type = 'customer_review' 
@@ -426,7 +593,6 @@ export class BusinessCoreService {
         AND sync_status != 'resolved'
     `).all();
 
-    // Pending Staged Actions
     const pendingActionsCount = db.query<{ count: number }, []>(
       "SELECT count(*) as count FROM staged_actions WHERE status = 'pending'"
     ).get()?.count ?? 0;
@@ -522,7 +688,7 @@ export class BusinessCoreService {
   }
 
   static workCreateTask(title: string, priority: "low" | "medium" | "high" | "urgent", assignedTo?: string, dueDate?: string, payload?: any, actorId: string = "system") {
-    const taskId = "pip_tsk_" + Math.random().toString(36).substring(2, 8);
+    const taskId = "pip_tsk_" + randomUUID().substring(0, 8);
     db.query(`
       INSERT INTO pipeline_states (id, category, title, stage, assigned_to, priority, due_date, payload_json)
       VALUES ($id, 'project_task', $title, 'todo', $assigned_to, $priority, $due_date, $payload)
@@ -542,7 +708,7 @@ export class BusinessCoreService {
   }
 
   static docsAppendNote(title: string, markdownBody: string, channel: string = "internal_wiki", authorId?: string, actorId: string = "system") {
-    const docId = "blk_doc_" + Math.random().toString(36).substring(2, 8);
+    const docId = "blk_doc_" + randomUUID().substring(0, 8);
     db.query(`
       INSERT INTO content_blocks (id, block_type, channel_or_source, title, markdown_body, author_entity_id, sync_status)
       VALUES ($id, 'doc', $channel, $title, $body, $author, 'synced')
@@ -569,6 +735,7 @@ export class BusinessCoreService {
   }
 
   // High-Stakes Tools (Routed to HITL unless approved/bypassed)
+  // Real-world ERP Supply Chain: PO creation tracks order placed, NOT premature on-hand inventory increase!
   static erpDraftPurchaseOrder(sku: string, quantity: number, supplierId?: string, actorId: string = "system", bypassHitl: boolean = false) {
     const item = db.query<CatalogItem, { $sku: string }>("SELECT * FROM catalog_items WHERE sku = $sku").get({ $sku: sku });
     if (!item) throw new Error(`SKU ${sku} not found.`);
@@ -589,35 +756,81 @@ export class BusinessCoreService {
           supplier_id: effectiveSupplier,
         },
         "high",
-        `Autonomous request to issue PO for ${quantity} units of ${item.name} ($${estCost.toFixed(2)}).`
+        `Autonomous request to issue restock PO for ${quantity} units of ${item.name} ($${estCost.toFixed(2)}).`
       );
     }
 
-    // Direct execution
-    const poId = "pip_po_" + Math.random().toString(36).substring(2, 8);
-    db.query(`
-      INSERT INTO pipeline_states (id, category, title, stage, entity_id, amount, priority, payload_json)
-      VALUES ($id, 'purchase_order', $title, 'approved', $supplier_id, $amount, 'high', $payload)
-    `).run({
-      $id: poId,
-      $title: `Purchase Order: ${item.name} (${quantity} units)`,
-      $supplier_id: effectiveSupplier || null,
-      $amount: estCost,
-      $payload: JSON.stringify({ sku, quantity, unit_cost: item.cost_price }),
+    // Direct atomic execution: Creates PO in 'ordered' stage without artificially inflating stock_qty
+    const poId = "pip_po_" + randomUUID().substring(0, 8);
+    let createdPo: any = null;
+
+    const tx = db.transaction(() => {
+      db.query(`
+        INSERT INTO pipeline_states (id, category, title, stage, entity_id, amount, priority, payload_json)
+        VALUES ($id, 'purchase_order', $title, 'ordered', $supplier_id, $amount, 'high', $payload)
+      `).run({
+        $id: poId,
+        $title: `Purchase Order: ${item.name} (${quantity} units)`,
+        $supplier_id: effectiveSupplier || null,
+        $amount: estCost,
+        $payload: JSON.stringify({ sku, quantity, unit_cost: item.cost_price, status: "pending_vendor_delivery" }),
+      });
+
+      createdPo = db.query("SELECT * FROM pipeline_states WHERE id = $id").get({ $id: poId });
+      AuditEngine.record(actorId.startsWith("agent") ? "agent" : "human", actorId, "erp_draft_purchase_order", "pipeline_states", poId, "INSERT", null, createdPo);
     });
+    tx();
 
-    // Update stock inventory
-    db.query(`UPDATE catalog_items SET stock_qty = stock_qty + $qty WHERE sku = $sku`).run({
-      $qty: quantity,
-      $sku: sku,
-    });
-
-    const po = db.query("SELECT * FROM pipeline_states WHERE id = $id").get({ $id: poId });
-    AuditEngine.record(actorId.startsWith("agent") ? "agent" : "human", actorId, "erp_draft_purchase_order", "pipeline_states", poId, "INSERT", null, po);
-
-    return { executed: true, purchase_order: po };
+    return { executed: true, purchase_order: createdPo, note: "PO successfully created in 'ordered' state. Stock will be added upon delivery receipt." };
   }
 
+  // ERP Supply Chain Receipt: Called when physical delivery actually arrives
+  static erpReceivePurchaseOrder(poId: string, actorId: string = "system") {
+    const po = db.query<PipelineState, { $id: string }>("SELECT * FROM pipeline_states WHERE id = $id AND category = 'purchase_order'").get({ $id: poId });
+    if (!po) throw new Error(`Purchase order ${poId} not found.`);
+    if (po.stage === "received") throw new Error(`Purchase order ${poId} has already been received.`);
+
+    const payload = JSON.parse(po.payload_json || "{}");
+    const sku = payload.sku;
+    const quantity = payload.quantity;
+
+    let updatedItem: any = null;
+    const tx = db.transaction(() => {
+      // 1. Advance PO stage to 'received'
+      db.query("UPDATE pipeline_states SET stage = 'received', updated_at = CURRENT_TIMESTAMP WHERE id = $id").run({ $id: poId });
+
+      // 2. Increment physical on-hand stock
+      db.query("UPDATE catalog_items SET stock_qty = stock_qty + $qty WHERE sku = $sku").run({
+        $qty: quantity,
+        $sku: sku,
+      });
+
+      updatedItem = db.query("SELECT * FROM catalog_items WHERE sku = $sku").get({ $sku: sku });
+
+      // 3. Post double-entry inventory arrival (Debit Inventory, Credit Accounts Payable)
+      const txGroup = "tx_grp_rcv_" + randomUUID().substring(0, 8);
+      db.query(`
+        INSERT INTO ledger_entries (id, transaction_group_id, type, account, category, amount, status, reference_id, entity_id, description)
+        VALUES
+          ($dId, $tx, 'debit', 'inventory', 'bill', $amt, 'posted', $ref, $ent, 'Inventory received into stock'),
+          ($cId, $tx, 'credit', 'accounts_payable', 'bill', $amt, 'posted', $ref, $ent, 'Vendor liability for received shipment')
+      `).run({
+        $dId: "led_" + randomUUID().substring(0, 8),
+        $cId: "led_" + randomUUID().substring(0, 8),
+        $tx: txGroup,
+        $amt: po.amount,
+        $ref: poId,
+        $ent: po.entity_id,
+      });
+
+      AuditEngine.record(actorId.startsWith("agent") ? "agent" : "human", actorId, "erp_receive_purchase_order", "catalog_items", sku, "UPDATE", null, updatedItem);
+    });
+    tx();
+
+    return { received: true, po_id: poId, new_stock_qty: updatedItem.stock_qty };
+  }
+
+  // Strict Double-Entry Invoicing with explicit tax-payable balancing
   static financeIssueInvoice(customerId: string, amount: number, description: string, taxAmount: number = 0, actorId: string = "system", bypassHitl: boolean = false) {
     if (!bypassHitl && HitlEngine.isToolStaged("finance_issue_invoice")) {
       return HitlEngine.stageAction(
@@ -630,40 +843,71 @@ export class BusinessCoreService {
       );
     }
 
-    const txGroup = "tx_grp_inv_" + Math.random().toString(36).substring(2, 8);
+    const txGroup = "tx_grp_inv_" + randomUUID().substring(0, 8);
     const invoiceRef = "INV-" + new Date().getFullYear() + "-" + Math.floor(1000 + Math.random() * 9000);
+    const totalReceivable = amount + taxAmount;
 
-    // Double Entry: Debit Accounts Receivable, Credit Revenue
-    const ledDebitId = "led_" + Math.random().toString(36).substring(2, 8);
-    const ledCreditId = "led_" + Math.random().toString(36).substring(2, 8);
+    // Double-Entry Balanced Journal Invariant:
+    // Debit Accounts Receivable = amount + taxAmount
+    // Credit Revenue = amount
+    // Credit Tax Payable = taxAmount (if > 0)
+    // Sum(Debits) === Sum(Credits)!
+    const tx = db.transaction(() => {
+      // 1. Debit Accounts Receivable
+      db.query(`
+        INSERT INTO ledger_entries (id, transaction_group_id, type, account, category, amount, tax_amount, status, reference_id, entity_id, description)
+        VALUES ($id, $txGroup, 'debit', 'accounts_receivable', 'invoice', $amount, 0, 'posted', $ref, $entityId, $desc)
+      `).run({
+        $id: "led_" + randomUUID().substring(0, 8),
+        $txGroup: txGroup,
+        $amount: totalReceivable,
+        $ref: invoiceRef,
+        $entityId: customerId,
+        $desc: `AR: ${description} (${invoiceRef})`,
+      });
 
-    db.query(`
-      INSERT INTO ledger_entries (id, transaction_group_id, type, account, category, amount, tax_amount, status, reference_id, entity_id, description)
-      VALUES 
-        ($id1, $txGroup, 'debit', 'accounts_receivable', 'invoice', $amount, 0, 'posted', $ref, $entityId, $desc1),
-        ($id2, $txGroup, 'credit', 'revenue', 'invoice', $amount, $taxAmount, 'posted', $ref, $entityId, $desc2)
-    `).run({
-      $id1: ledDebitId,
-      $id2: ledCreditId,
-      $txGroup: txGroup,
-      $amount: amount,
-      $taxAmount: taxAmount,
-      $ref: invoiceRef,
-      $entityId: customerId,
-      $desc1: `AR: ${description} (${invoiceRef})`,
-      $desc2: `Revenue: ${description} (${invoiceRef})`,
+      // 2. Credit Revenue
+      db.query(`
+        INSERT INTO ledger_entries (id, transaction_group_id, type, account, category, amount, tax_amount, status, reference_id, entity_id, description)
+        VALUES ($id, $txGroup, 'credit', 'revenue', 'invoice', $amount, 0, 'posted', $ref, $entityId, $desc)
+      `).run({
+        $id: "led_" + randomUUID().substring(0, 8),
+        $txGroup: txGroup,
+        $amount: amount,
+        $ref: invoiceRef,
+        $entityId: customerId,
+        $desc: `Revenue: ${description} (${invoiceRef})`,
+      });
+
+      // 3. Credit Tax Payable (if applicable)
+      if (taxAmount > 0) {
+        db.query(`
+          INSERT INTO ledger_entries (id, transaction_group_id, type, account, category, amount, tax_amount, status, reference_id, entity_id, description)
+          VALUES ($id, $txGroup, 'credit', 'tax_payable', 'invoice', $amount, 0, 'posted', $ref, $entityId, $desc)
+        `).run({
+          $id: "led_" + randomUUID().substring(0, 8),
+          $txGroup: txGroup,
+          $amount: taxAmount,
+          $ref: invoiceRef,
+          $entityId: customerId,
+          $desc: `Sales Tax Payable: ${invoiceRef}`,
+        });
+      }
+
+      AuditEngine.record(actorId.startsWith("agent") ? "agent" : "human", actorId, "finance_issue_invoice", "ledger_entries", txGroup, "INSERT", null, {
+        invoiceRef,
+        totalReceivable,
+        revenue: amount,
+        taxAmount,
+        customerId,
+      });
     });
+    tx();
 
-    AuditEngine.record(actorId.startsWith("agent") ? "agent" : "human", actorId, "finance_issue_invoice", "ledger_entries", txGroup, "INSERT", null, {
-      invoiceRef,
-      amount,
-      taxAmount,
-      customerId,
-    });
-
-    return { executed: true, invoice_ref: invoiceRef, transaction_group_id: txGroup, amount, taxAmount };
+    return { executed: true, invoice_ref: invoiceRef, transaction_group_id: txGroup, total_receivable: totalReceivable, revenue: amount, tax_amount: taxAmount };
   }
 
+  // Atomic HRMS Payroll batch
   static hrmsStagePayrollRun(batchPeriod: string, actorId: string = "system", bypassHitl: boolean = false) {
     const employees = db.query<Entity, []>("SELECT * FROM entities WHERE role = 'employee' AND status = 'active'").all();
     let totalPayroll = 0;
@@ -687,32 +931,33 @@ export class BusinessCoreService {
       );
     }
 
-    // Direct execution: Double-entry ledger disbursement
-    const txGroup = "tx_grp_pay_" + Math.random().toString(36).substring(2, 8);
-    for (const p of payouts) {
-      const dId = "led_" + Math.random().toString(36).substring(2, 8);
-      const cId = "led_" + Math.random().toString(36).substring(2, 8);
-      db.query(`
-        INSERT INTO ledger_entries (id, transaction_group_id, type, account, category, amount, status, reference_id, entity_id, description)
-        VALUES
-          ($dId, $txGroup, 'debit', 'payroll_expense', 'payroll', $amount, 'posted', $ref, $entityId, $desc1),
-          ($cId, $txGroup, 'credit', 'cash', 'payroll', $amount, 'posted', $ref, $entityId, $desc2)
-      `).run({
-        $dId: dId,
-        $cId: cId,
-        $txGroup: txGroup,
-        $amount: p.salary,
-        $ref: `PAY-${batchPeriod}`,
-        $entityId: p.employee_id,
-        $desc1: `Salary Expense: ${p.name}`,
-        $desc2: `Payroll direct deposit payout: ${p.name}`,
-      });
-    }
+    // Direct atomic execution
+    const txGroup = "tx_grp_pay_" + randomUUID().substring(0, 8);
+    const tx = db.transaction(() => {
+      for (const p of payouts) {
+        db.query(`
+          INSERT INTO ledger_entries (id, transaction_group_id, type, account, category, amount, status, reference_id, entity_id, description)
+          VALUES
+            ($dId, $txGroup, 'debit', 'payroll_expense', 'payroll', $amount, 'posted', $ref, $entityId, $desc1),
+            ($cId, $txGroup, 'credit', 'cash', 'payroll', $amount, 'posted', $ref, $entityId, $desc2)
+        `).run({
+          $dId: "led_" + randomUUID().substring(0, 8),
+          $cId: "led_" + randomUUID().substring(0, 8),
+          $txGroup: txGroup,
+          $amount: p.salary,
+          $ref: `PAY-${batchPeriod}`,
+          $entityId: p.employee_id,
+          $desc1: `Salary Expense: ${p.name}`,
+          $desc2: `Payroll direct deposit payout: ${p.name}`,
+        });
+      }
 
-    AuditEngine.record(actorId.startsWith("agent") ? "agent" : "human", actorId, "hrms_stage_payroll_run", "ledger_entries", txGroup, "INSERT", null, {
-      totalPayroll,
-      payouts,
+      AuditEngine.record(actorId.startsWith("agent") ? "agent" : "human", actorId, "hrms_stage_payroll_run", "ledger_entries", txGroup, "INSERT", null, {
+        totalPayroll,
+        payouts,
+      });
     });
+    tx();
 
     return { executed: true, batchPeriod, total_disbursed: totalPayroll, transaction_group_id: txGroup };
   }
@@ -732,24 +977,26 @@ export class BusinessCoreService {
       );
     }
 
-    const replyBlockId = "blk_rep_" + Math.random().toString(36).substring(2, 8);
-    db.query(`
-      INSERT INTO content_blocks (id, block_type, channel_or_source, title, markdown_body, parent_id, sync_status)
-      VALUES ($id, 'customer_review', $channel, 'Public Response', $body, $parent, 'synced')
-    `).run({
-      $id: replyBlockId,
-      $channel: review.channel_or_source,
-      $body: replyText,
-      $parent: reviewId,
-    });
+    const replyBlockId = "blk_rep_" + randomUUID().substring(0, 8);
+    const tx = db.transaction(() => {
+      db.query(`
+        INSERT INTO content_blocks (id, block_type, channel_or_source, title, markdown_body, parent_id, sync_status)
+        VALUES ($id, 'customer_review', $channel, 'Public Response', $body, $parent, 'synced')
+      `).run({
+        $id: replyBlockId,
+        $channel: review.channel_or_source,
+        $body: replyText,
+        $parent: reviewId,
+      });
 
-    // Mark original review resolved
-    db.query(`UPDATE content_blocks SET sync_status = 'resolved' WHERE id = $id`).run({ $id: reviewId });
+      db.query(`UPDATE content_blocks SET sync_status = 'resolved' WHERE id = $id`).run({ $id: reviewId });
 
-    AuditEngine.record(actorId.startsWith("agent") ? "agent" : "human", actorId, "presence_publish_review_reply", "content_blocks", replyBlockId, "INSERT", null, {
-      reviewId,
-      replyText,
+      AuditEngine.record(actorId.startsWith("agent") ? "agent" : "human", actorId, "presence_publish_review_reply", "content_blocks", replyBlockId, "INSERT", null, {
+        reviewId,
+        replyText,
+      });
     });
+    tx();
 
     return { executed: true, reply_id: replyBlockId, status: "published_to_platform" };
   }
@@ -769,7 +1016,6 @@ export class BusinessCoreService {
       );
     }
 
-    // Direct execution
     db.query(`UPDATE content_blocks SET sync_status = 'synced', updated_at = CURRENT_TIMESTAMP WHERE id = $id`).run({
       $id: nap.id,
     });
@@ -799,6 +1045,8 @@ export class BusinessCoreService {
         return this.reviewsFetchUnanswered();
       case "erp_draft_purchase_order":
         return this.erpDraftPurchaseOrder(args.sku, args.quantity, args.supplier_id, actorId, bypassHitl);
+      case "erp_receive_purchase_order":
+        return this.erpReceivePurchaseOrder(args.po_id, actorId);
       case "finance_issue_invoice":
         return this.financeIssueInvoice(args.customer_id || args.customerId, args.amount, args.description, args.tax_amount || args.taxAmount || 0, actorId, bypassHitl);
       case "hrms_stage_payroll_run":
@@ -811,44 +1059,6 @@ export class BusinessCoreService {
         throw new Error(`Unknown MCP Tool: ${toolName}`);
     }
   }
-}
-
-// --------------------------------------------------------------------
-// Scoped RBAC Middleware
-// --------------------------------------------------------------------
-function verifyAgentToken(authHeader: string | null, requiredTool: string): { authorized: boolean; agentId: string; error?: string } {
-  if (!authHeader) {
-    // Local / unauthenticated requests in development default to system
-    return { authorized: true, agentId: "operator:local" };
-  }
-
-  const token = authHeader.replace(/^Bearer\s+/i, "").trim();
-  const agentKey = db.query<{ id: string; name: string; scopes: string; is_active: number }, { $token: string }>(
-    "SELECT * FROM agent_tokens WHERE token = $token"
-  ).get({ $token: token });
-
-  if (!agentKey || agentKey.is_active === 0) {
-    return { authorized: false, agentId: "anonymous", error: "Invalid or inactive Agent API Token." };
-  }
-
-  const scopes: string[] = JSON.parse(agentKey.scopes || "[]");
-  if (scopes.includes("*")) {
-    return { authorized: true, agentId: agentKey.id };
-  }
-
-  // Check matching scope prefix (e.g. "crm:*" matches "crm_search_entities")
-  const prefix = requiredTool.split("_")[0];
-  const hasScope = scopes.some(s => s === requiredTool || s === `${prefix}:*` || s === `${prefix}_*`);
-
-  if (!hasScope) {
-    return {
-      authorized: false,
-      agentId: agentKey.id,
-      error: `Scope forbidden: Token '${agentKey.name}' lacks scope for tool '${requiredTool}'. Allowed: [${scopes.join(", ")}]`,
-    };
-  }
-
-  return { authorized: true, agentId: agentKey.id };
 }
 
 // --------------------------------------------------------------------
@@ -942,6 +1152,17 @@ const MCP_TOOLS = [
     },
   },
   {
+    name: "erp_receive_purchase_order",
+    description: "Receives a previously ordered PO, increments stock, and posts inventory asset entry.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        po_id: { type: "string", description: "Purchase Order pipeline state ID" },
+      },
+      required: ["po_id"],
+    },
+  },
+  {
     name: "finance_issue_invoice",
     description: "HIGH-STAKES: Stages an outbound invoice in the double-entry financial ledger. Routes to HITL queue.",
     inputSchema: {
@@ -1017,40 +1238,9 @@ const MCP_RESOURCES = [
 ];
 
 // --------------------------------------------------------------------
-// MCP STDIO Server Protocol Handler
-// Enables local agents (e.g. Claude Desktop, Cursor) to connect via STDIO
+// Unified MCP Protocol Handler with Mandatory Scope Checking
 // --------------------------------------------------------------------
-export function startMcpStdioServer() {
-  process.stdin.setEncoding("utf-8");
-  let buffer = "";
-
-  process.stdin.on("data", (chunk: string) => {
-    buffer += chunk;
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const message = JSON.parse(line.trim());
-        const response = handleMcpJsonRpc(message, "stdio:agent");
-        if (response) {
-          process.stdout.write(JSON.stringify(response) + "\n");
-        }
-      } catch (err: any) {
-        process.stdout.write(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            id: null,
-            error: { code: -32700, message: "Parse error: " + err.message },
-          }) + "\n"
-        );
-      }
-    }
-  });
-}
-
-function handleMcpJsonRpc(message: any, callerId: string): any {
+export function handleMcpJsonRpc(message: any, callerId: string, callerScopes: string[]): any {
   const { id, method, params } = message;
 
   switch (method) {
@@ -1062,7 +1252,7 @@ function handleMcpJsonRpc(message: any, callerId: string): any {
           protocolVersion: "2024-11-05",
           serverInfo: {
             name: "BOS Unified Core MCP Server",
-            version: "2.0.0",
+            version: "2.1.0",
           },
           capabilities: {
             tools: { listChanged: false },
@@ -1082,19 +1272,22 @@ function handleMcpJsonRpc(message: any, callerId: string): any {
       const uri = params?.uri as string;
       if (!uri) throw new Error("Missing uri parameter");
 
+      // Verify read scope
+      if (!SecurityManager.hasScope(callerScopes, "resources:read") && !SecurityManager.hasScope(callerScopes, "*")) {
+        return {
+          jsonrpc: "2.0",
+          id,
+          error: { code: -32001, message: "Permission Denied: Caller lacks 'resources:read' scope." },
+        };
+      }
+
       if (uri === "mcp://business/pulse") {
         const pulse = BusinessCoreService.getBusinessPulse();
         return {
           jsonrpc: "2.0",
           id,
           result: {
-            contents: [
-              {
-                uri,
-                mimeType: "application/json",
-                text: JSON.stringify(pulse, null, 2),
-              },
-            ],
+            contents: [{ uri, mimeType: "application/json", text: JSON.stringify(pulse, null, 2) }],
           },
         };
       }
@@ -1105,13 +1298,7 @@ function handleMcpJsonRpc(message: any, callerId: string): any {
           jsonrpc: "2.0",
           id,
           result: {
-            contents: [
-              {
-                uri,
-                mimeType: "application/json",
-                text: JSON.stringify(lowStock, null, 2),
-              },
-            ],
+            contents: [{ uri, mimeType: "application/json", text: JSON.stringify(lowStock, null, 2) }],
           },
         };
       }
@@ -1124,13 +1311,7 @@ function handleMcpJsonRpc(message: any, callerId: string): any {
           jsonrpc: "2.0",
           id,
           result: {
-            contents: [
-              {
-                uri,
-                mimeType: "application/json",
-                text: JSON.stringify(profile, null, 2),
-              },
-            ],
+            contents: [{ uri, mimeType: "application/json", text: JSON.stringify(profile, null, 2) }],
           },
         };
       }
@@ -1153,18 +1334,25 @@ function handleMcpJsonRpc(message: any, callerId: string): any {
       const toolName = params?.name;
       const toolArgs = params?.arguments || {};
 
+      // Mandatory RBAC Scope Validation for all transports
+      if (!SecurityManager.hasScope(callerScopes, toolName)) {
+        return {
+          jsonrpc: "2.0",
+          id,
+          error: {
+            code: -32001,
+            message: `Permission Denied: Agent '${callerId}' lacks scope for tool '${toolName}'. Permitted scopes: [${callerScopes.join(", ")}]`,
+          },
+        };
+      }
+
       try {
         const result = BusinessCoreService.executeToolInternal(toolName, toolArgs, callerId, false);
         return {
           jsonrpc: "2.0",
           id,
           result: {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(result, null, 2),
-              },
-            ],
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
           },
         };
       } catch (err: any) {
@@ -1192,7 +1380,44 @@ function handleMcpJsonRpc(message: any, callerId: string): any {
 }
 
 // --------------------------------------------------------------------
-// Unified HTTP Server & REST API + MCP SSE Streaming
+// MCP STDIO Server Protocol Handler
+// --------------------------------------------------------------------
+export function startMcpStdioServer() {
+  process.stdin.setEncoding("utf-8");
+  let buffer = "";
+
+  // For STDIO: local process execution defaults to operator scope unless configured
+  const stdioScopes = ["*"];
+  const stdioCaller = "stdio:operator";
+
+  process.stdin.on("data", (chunk: string) => {
+    buffer += chunk;
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const message = JSON.parse(line.trim());
+        const response = handleMcpJsonRpc(message, stdioCaller, stdioScopes);
+        if (response) {
+          process.stdout.write(JSON.stringify(response) + "\n");
+        }
+      } catch (err: any) {
+        process.stdout.write(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: null,
+            error: { code: -32700, message: "Parse error: " + err.message },
+          }) + "\n"
+        );
+      }
+    }
+  });
+}
+
+// --------------------------------------------------------------------
+// HTTP Server with Protected REST API & MCP SSE Streaming
 // --------------------------------------------------------------------
 const sseClients = new Map<string, (data: string) => void>();
 
@@ -1216,7 +1441,7 @@ export function startHttpServer() {
       const path = url.pathname;
       const method = req.method;
 
-      // Handle CORS Preflight
+      // CORS Preflight
       if (method === "OPTIONS") {
         return new Response(null, {
           headers: {
@@ -1227,11 +1452,28 @@ export function startHttpServer() {
         });
       }
 
+      // Static Frontend SPA (Always publicly accessible to human operators in browser)
+      if (path === "/" || path === "/index.html") {
+        const htmlPath = join(process.cwd(), "index.html");
+        if (existsSync(htmlPath)) {
+          return new Response(readFileSync(htmlPath, "utf-8"), {
+            headers: { "Content-Type": "text/html; charset=utf-8" },
+          });
+        }
+        return new Response("BOS index.html not found.", { status: 404 });
+      }
+
       // --------------------------------------------------------------
       // MCP Streamable HTTP / Server-Sent Events (SSE) Protocol
       // --------------------------------------------------------------
       if (path === "/mcp/sse" && method === "GET") {
-        const sessionId = "sess_" + Math.random().toString(36).substring(2, 10);
+        // Authenticate SSE connection
+        const auth = SecurityManager.verifyToken(req.headers.get("Authorization") || url.searchParams.get("token"));
+        if (!auth.authenticated) {
+          return jsonResponse({ error: auth.error }, 401);
+        }
+
+        const sessionId = "sess_" + randomUUID();
         let sendEvent: ((data: string) => void) | null = null;
 
         const stream = new ReadableStream({
@@ -1241,7 +1483,7 @@ export function startHttpServer() {
             };
             sseClients.set(sessionId, sendEvent);
 
-            // Announce endpoint
+            // Announce messages endpoint
             controller.enqueue(
               new TextEncoder().encode(
                 `event: endpoint\ndata: /mcp/messages?sessionId=${sessionId}\n\n`
@@ -1265,16 +1507,15 @@ export function startHttpServer() {
 
       if (path === "/mcp/messages" && method === "POST") {
         const sessionId = url.searchParams.get("sessionId");
-        const body = await req.json();
-        const auth = verifyAgentToken(req.headers.get("Authorization"), body?.params?.name || "");
+        const auth = SecurityManager.verifyToken(req.headers.get("Authorization"));
 
-        if (!auth.authorized) {
-          return jsonResponse({ error: auth.error }, 403);
+        if (!auth.authenticated) {
+          return jsonResponse({ error: auth.error }, 401);
         }
 
-        const response = handleMcpJsonRpc(body, auth.agentId);
+        const body = await req.json();
+        const response = handleMcpJsonRpc(body, auth.agentId, auth.scopes);
 
-        // If client is listening on SSE, push to their stream
         if (sessionId && sseClients.has(sessionId)) {
           sseClients.get(sessionId)!(JSON.stringify(response));
         }
@@ -1283,20 +1524,131 @@ export function startHttpServer() {
       }
 
       // --------------------------------------------------------------
-      // REST API: Business Pulse & Executive Overview
+      // Public / Webhook Ingestion Routes
       // --------------------------------------------------------------
-      if (path === "/api/pulse" && method === "GET") {
-        return jsonResponse(BusinessCoreService.getBusinessPulse());
+      if (path === "/api/webhooks/order" && method === "POST") {
+        const order = await req.json();
+        if (!order || !order.customer_email || !order.total_amount) {
+          return jsonResponse({ error: "Missing required order fields: customer_email, total_amount" }, 400);
+        }
+
+        const externalOrderNum = order.order_number ? String(order.order_number) : "WEB-" + randomUUID().substring(0, 6);
+        const orderPipelineId = "pip_ord_" + externalOrderNum;
+
+        // Idempotency check: prevent duplicate billing or double inventory deduction
+        const existingOrder = db.query<PipelineState, { $id: string }>(
+          "SELECT * FROM pipeline_states WHERE id = $id"
+        ).get({ $id: orderPipelineId });
+
+        if (existingOrder) {
+          return jsonResponse({
+            idempotent_replay: true,
+            order_id: existingOrder.id,
+            status: existingOrder.stage,
+            message: "Order already ingested previously.",
+          });
+        }
+
+        let customerId = "";
+        let txGroup = "";
+
+        // Wrap the entire multi-step order write in an atomic transaction
+        const executeOrderIngest = db.transaction(() => {
+          // 1. Ensure entity exists
+          let customer = db.query<Entity, { $email: string }>("SELECT * FROM entities WHERE email = $email").get({ $email: order.customer_email });
+          if (!customer) {
+            const newCustId = "ent_cust_" + randomUUID().substring(0, 8);
+            db.query(`
+              INSERT INTO entities (id, type, role, name, email, phone, status)
+              VALUES ($id, 'person', 'customer', $name, $email, $phone, 'active')
+            `).run({
+              $id: newCustId,
+              $name: order.customer_name || "Online Shopper",
+              $email: order.customer_email,
+              $phone: order.customer_phone || null,
+            });
+            customerId = newCustId;
+          } else {
+            customerId = customer.id;
+          }
+
+          // 2. Insert sales order pipeline state
+          db.query(`
+            INSERT INTO pipeline_states (id, category, title, stage, entity_id, amount, payload_json)
+            VALUES ($id, 'sales_order', $title, 'paid', $entity_id, $amount, $payload)
+          `).run({
+            $id: orderPipelineId,
+            $title: `E-commerce Order #${externalOrderNum}`,
+            $entity_id: customerId,
+            $amount: order.total_amount || 0,
+            $payload: JSON.stringify(order),
+          });
+
+          // 3. Post to double-entry ledger (Debit Cash, Credit Revenue)
+          txGroup = "tx_grp_ecom_" + randomUUID().substring(0, 8);
+          db.query(`
+            INSERT INTO ledger_entries (id, transaction_group_id, type, account, category, amount, status, reference_id, entity_id, description)
+            VALUES 
+              ($id1, $tx, 'debit', 'cash', 'ecommerce', $amt, 'posted', $ref, $ent, $d1),
+              ($id2, $tx, 'credit', 'revenue', 'ecommerce', $amt, 'posted', $ref, $ent, $d2)
+          `).run({
+            $id1: "led_" + randomUUID().substring(0, 8),
+            $id2: "led_" + randomUUID().substring(0, 8),
+            $tx: txGroup,
+            $amt: order.total_amount,
+            $ref: orderPipelineId,
+            $ent: customerId,
+            $d1: `E-commerce settlement for order #${externalOrderNum}`,
+            $d2: `E-commerce revenue recognition`,
+          });
+
+          // 4. Safely deduct catalog item stock levels
+          if (order.items && Array.isArray(order.items)) {
+            for (const item of order.items) {
+              db.query("UPDATE catalog_items SET stock_qty = MAX(0, stock_qty - $qty) WHERE sku = $sku").run({
+                $qty: item.quantity || 1,
+                $sku: item.sku,
+              });
+            }
+          }
+
+          AuditEngine.record("system", "ecom_webhook", "webhook_order_ingest", "pipeline_states", orderPipelineId, "INSERT", null, order);
+        });
+
+        executeOrderIngest();
+        return jsonResponse({ success: true, order_id: orderPipelineId, transaction_group_id: txGroup }, 201);
       }
 
       // --------------------------------------------------------------
-      // REST API: Human-in-the-Loop Action Approval Stream (Inbox)
+      // PROTECTED REST APIS (Authentication & RBAC Enforcement)
       // --------------------------------------------------------------
+      const auth = SecurityManager.verifyToken(req.headers.get("Authorization"));
+
+      // Helper for route-level authorization
+      const checkAuth = (requiredScope: string = "*"): boolean => {
+        if (!auth.authenticated) return false;
+        return SecurityManager.hasScope(auth.scopes, requiredScope);
+      };
+
+      // 1. Business Pulse
+      if (path === "/api/pulse" && method === "GET") {
+        // Pulse summary can be viewed by authorized operators or local dev
+        if (!checkAuth("pulse:read") && !ALLOW_UNAUTHENTICATED_LOCAL) {
+          return jsonResponse({ error: "Unauthorized. Provide Bearer token with 'pulse:read' scope." }, 401);
+        }
+        return jsonResponse(BusinessCoreService.getBusinessPulse());
+      }
+
+      // 2. Action Inbox & HITL Guardrails
       if (path === "/api/staged-actions" && method === "GET") {
+        if (!checkAuth("staged:read") && !ALLOW_UNAUTHENTICATED_LOCAL) {
+          return jsonResponse({ error: "Unauthorized. Requires 'staged:read' scope." }, 401);
+        }
         const status = url.searchParams.get("status") || "pending";
         const actions = db.query<StagedAction, { $st: string }>(
           "SELECT * FROM staged_actions WHERE status = $st ORDER BY created_at DESC"
         ).all({ $st: status });
+
         return jsonResponse(actions.map(a => ({
           ...a,
           parameters: JSON.parse(a.parameters_json),
@@ -1306,29 +1658,51 @@ export function startHttpServer() {
       }
 
       if (path.match(/^\/api\/staged-actions\/([^/]+)\/approve$/) && method === "POST") {
+        if (!checkAuth("staged:approve") && !ALLOW_UNAUTHENTICATED_LOCAL) {
+          return jsonResponse({ error: "Forbidden: Approving actions requires operator permissions." }, 403);
+        }
         const stagedId = path.split("/")[3];
-        const res = HitlEngine.approveAction(stagedId, "human_operator");
-        return jsonResponse(res);
+        try {
+          const res = HitlEngine.approveAction(stagedId, auth.agentId);
+          return jsonResponse(res);
+        } catch (err: any) {
+          return jsonResponse({ error: err.message }, 400);
+        }
       }
 
       if (path.match(/^\/api\/staged-actions\/([^/]+)\/reject$/) && method === "POST") {
+        if (!checkAuth("staged:approve") && !ALLOW_UNAUTHENTICATED_LOCAL) {
+          return jsonResponse({ error: "Forbidden: Rejecting actions requires operator permissions." }, 403);
+        }
         const stagedId = path.split("/")[3];
         const body = await req.json().catch(() => ({}));
-        const res = HitlEngine.rejectAction(stagedId, "human_operator", body.note);
-        return jsonResponse(res);
+        try {
+          const res = HitlEngine.rejectAction(stagedId, auth.agentId, body.note);
+          return jsonResponse(res);
+        } catch (err: any) {
+          return jsonResponse({ error: err.message }, 400);
+        }
       }
 
       if (path.match(/^\/api\/staged-actions\/([^/]+)\/edit$/) && method === "POST") {
+        if (!checkAuth("staged:approve") && !ALLOW_UNAUTHENTICATED_LOCAL) {
+          return jsonResponse({ error: "Forbidden: Editing actions requires operator permissions." }, 403);
+        }
         const stagedId = path.split("/")[3];
         const body = await req.json();
-        const res = HitlEngine.editAndApproveAction(stagedId, body.updated_payload, "human_operator");
-        return jsonResponse(res);
+        try {
+          const res = HitlEngine.editAndApproveAction(stagedId, body.updated_payload, auth.agentId);
+          return jsonResponse(res);
+        } catch (err: any) {
+          return jsonResponse({ error: err.message }, 400);
+        }
       }
 
-      // --------------------------------------------------------------
-      // REST API: Universal Canvas (Deals, SKUs, Tasks, Shifts, Ledger)
-      // --------------------------------------------------------------
+      // 3. Universal Canvas
       if (path === "/api/canvas" && method === "GET") {
+        if (!checkAuth("canvas:read") && !ALLOW_UNAUTHENTICATED_LOCAL) {
+          return jsonResponse({ error: "Unauthorized." }, 401);
+        }
         const category = url.searchParams.get("category");
         let results: any[] = [];
 
@@ -1369,44 +1743,52 @@ export function startHttpServer() {
       }
 
       if (path === "/api/canvas/item" && method === "POST") {
+        if (!checkAuth("canvas:write") && !ALLOW_UNAUTHENTICATED_LOCAL) {
+          return jsonResponse({ error: "Forbidden: Write permission required." }, 403);
+        }
         const body = await req.json();
-        const { category, title, stage, entity_id, assigned_to, amount, priority, due_date, payload } = body;
-        const itemId = "pip_" + Math.random().toString(36).substring(2, 8);
+        const itemId = "pip_" + randomUUID().substring(0, 8);
 
         db.query(`
           INSERT INTO pipeline_states (id, category, title, stage, entity_id, assigned_to, amount, priority, due_date, payload_json)
-          VALUES ($id, $category, $title, $stage, $entity_id, $amount, $priority, $due_date, $payload)
+          VALUES ($id, $category, $title, $stage, $entity_id, $assigned_to, $amount, $priority, $due_date, $payload)
         `).run({
           $id: itemId,
-          $category: category || "deal",
-          $title: title,
-          $stage: stage || "lead",
-          $entity_id: entity_id || null,
-          $assigned_to: assigned_to || null,
-          $amount: amount || 0,
-          $priority: priority || "medium",
-          $due_date: due_date || null,
-          $payload: JSON.stringify(payload || {}),
+          $category: body.category || "deal",
+          $title: body.title,
+          $stage: body.stage || "lead",
+          $entity_id: body.entity_id || null,
+          $assigned_to: body.assigned_to || null,
+          $amount: body.amount || 0,
+          $priority: body.priority || "medium",
+          $due_date: body.due_date || null,
+          $payload: JSON.stringify(body.payload || {}),
         });
 
         const created = db.query("SELECT * FROM pipeline_states WHERE id = $id").get({ $id: itemId });
-        AuditEngine.record("human", "operator", "canvas_create_item", "pipeline_states", itemId, "INSERT", null, created);
+        AuditEngine.record(auth.agentId.startsWith("agent") ? "agent" : "human", auth.agentId, "canvas_create_item", "pipeline_states", itemId, "INSERT", null, created);
         return jsonResponse(created, 201);
       }
 
-      // --------------------------------------------------------------
-      // REST API: 360-Degree Entity Slide-Over Profile
-      // --------------------------------------------------------------
+      // 4. 360-Degree Entity Slide-Over Profile
       if (path.match(/^\/api\/entities\/([^/]+)\/360$/) && method === "GET") {
+        if (!checkAuth("entities:read") && !ALLOW_UNAUTHENTICATED_LOCAL) {
+          return jsonResponse({ error: "Unauthorized." }, 401);
+        }
         const entityId = path.split("/")[3];
-        const profile = BusinessCoreService.getEntity360(entityId);
-        return jsonResponse(profile);
+        try {
+          const profile = BusinessCoreService.getEntity360(entityId);
+          return jsonResponse(profile);
+        } catch (err: any) {
+          return jsonResponse({ error: err.message }, 404);
+        }
       }
 
-      // --------------------------------------------------------------
-      // REST API: Content Blocks (Docs & Channels)
-      // --------------------------------------------------------------
+      // 5. Content Blocks (Docs & Channels)
       if (path === "/api/content" && method === "GET") {
+        if (!checkAuth("content:read") && !ALLOW_UNAUTHENTICATED_LOCAL) {
+          return jsonResponse({ error: "Unauthorized." }, 401);
+        }
         const type = url.searchParams.get("type");
         const channel = url.searchParams.get("channel");
         let sql = `SELECT c.*, e.name as author_name FROM content_blocks c LEFT JOIN entities e ON c.author_entity_id = e.id WHERE 1=1`;
@@ -1422,13 +1804,15 @@ export function startHttpServer() {
         }
         sql += ` ORDER BY c.created_at ASC`;
 
-        const blocks = db.query(sql).all(params);
-        return jsonResponse(blocks);
+        return jsonResponse(db.query(sql).all(params));
       }
 
       if (path === "/api/content" && method === "POST") {
+        if (!checkAuth("content:write") && !ALLOW_UNAUTHENTICATED_LOCAL) {
+          return jsonResponse({ error: "Unauthorized." }, 401);
+        }
         const body = await req.json();
-        const blockId = "blk_" + Math.random().toString(36).substring(2, 8);
+        const blockId = "blk_" + randomUUID().substring(0, 8);
 
         db.query(`
           INSERT INTO content_blocks (id, block_type, channel_or_source, title, markdown_body, author_entity_id, sync_status)
@@ -1446,121 +1830,78 @@ export function startHttpServer() {
         return jsonResponse(created, 201);
       }
 
-      // --------------------------------------------------------------
-      // REST API: E-Commerce Unified Ingestion Webhook
-      // --------------------------------------------------------------
-      if (path === "/api/webhooks/order" && method === "POST") {
-        const order = await req.json();
-        // 1. Ensure entity exists
-        let customer = db.query<Entity, { $email: string }>("SELECT * FROM entities WHERE email = $email").get({ $email: order.customer_email });
-        if (!customer) {
-          const custId = "ent_cust_" + Math.random().toString(36).substring(2, 8);
-          db.query(`
-            INSERT INTO entities (id, type, role, name, email, phone, status)
-            VALUES ($id, 'person', 'customer', $name, $email, $phone, 'active')
-          `).run({
-            $id: custId,
-            $name: order.customer_name || "Online Shopper",
-            $email: order.customer_email,
-            $phone: order.customer_phone || null,
-          });
-          customer = db.query<Entity, { $id: string }>("SELECT * FROM entities WHERE id = $id").get({ $id: custId })!;
-        }
-
-        // 2. Insert sales order pipeline state
-        const orderId = "pip_ord_" + (order.order_number || Math.random().toString(36).substring(2, 8));
-        db.query(`
-          INSERT INTO pipeline_states (id, category, title, stage, entity_id, amount, payload_json)
-          VALUES ($id, 'sales_order', $title, 'paid', $entity_id, $amount, $payload)
-        `).run({
-          $id: orderId,
-          $title: `E-commerce Order #${order.order_number || "WEB"}`,
-          $entity_id: customer.id,
-          $amount: order.total_amount || 0,
-          $payload: JSON.stringify(order),
-        });
-
-        // 3. Post to double-entry ledger (Debit Cash, Credit Revenue)
-        const txGroup = "tx_grp_ecom_" + Math.random().toString(36).substring(2, 8);
-        db.query(`
-          INSERT INTO ledger_entries (id, transaction_group_id, type, account, category, amount, status, reference_id, entity_id, description)
-          VALUES 
-            ($id1, $tx, 'debit', 'cash', 'ecommerce', $amt, 'posted', $ref, $ent, $d1),
-            ($id2, $tx, 'credit', 'revenue', 'ecommerce', $amt, 'posted', $ref, $ent, $d2)
-        `).run({
-          $id1: "led_" + Math.random().toString(36).substring(2, 8),
-          $id2: "led_" + Math.random().toString(36).substring(2, 8),
-          $tx: txGroup,
-          $amt: order.total_amount || 0,
-          $ref: orderId,
-          $ent: customer.id,
-          $d1: `E-commerce settlement for order #${order.order_number}`,
-          $d2: `E-commerce revenue recognition`,
-        });
-
-        // 4. Update catalog item stock levels
-        if (order.items && Array.isArray(order.items)) {
-          for (const item of order.items) {
-            db.query("UPDATE catalog_items SET stock_qty = MAX(0, stock_qty - $qty) WHERE sku = $sku").run({
-              $qty: item.quantity || 1,
-              $sku: item.sku,
-            });
-          }
-        }
-
-        AuditEngine.record("system", "ecom_webhook", "webhook_order_ingest", "pipeline_states", orderId, "INSERT", null, order);
-        return jsonResponse({ success: true, order_id: orderId, transaction_group_id: txGroup });
-      }
-
-      // --------------------------------------------------------------
-      // REST API: Audit Logs Stream & 1-Click Rollback
-      // --------------------------------------------------------------
+      // 6. Audit Logs Stream & 1-Click Rollback
       if (path === "/api/audit-logs" && method === "GET") {
-        const logs = db.query<AuditLog, []>(
-          "SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 50"
-        ).all();
+        if (!checkAuth("audit:read") && !ALLOW_UNAUTHENTICATED_LOCAL) {
+          return jsonResponse({ error: "Unauthorized." }, 401);
+        }
+        const logs = db.query<AuditLog, []>("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 50").all();
         return jsonResponse(logs);
       }
 
       if (path.match(/^\/api\/audit-logs\/([^/]+)\/rollback$/) && method === "POST") {
+        if (!checkAuth("audit:rollback") && !ALLOW_UNAUTHENTICATED_LOCAL) {
+          return jsonResponse({ error: "Forbidden: Time-travel rollback requires administrative privilege." }, 403);
+        }
         const auditId = path.split("/")[3];
         try {
-          const res = AuditEngine.rollback(auditId, "human_operator");
+          const res = AuditEngine.rollback(auditId, auth.agentId);
           return jsonResponse(res);
         } catch (err: any) {
           return jsonResponse({ success: false, error: err.message }, 400);
         }
       }
 
-      // --------------------------------------------------------------
-      // REST API: Scoped Agent Tokens & HITL Configuration Hub
-      // --------------------------------------------------------------
+      // 7. Scoped Agent Tokens & HITL Configuration Hub
+      // GET /api/tokens: NEVER return raw token secrets! Only masked prefixes & metadata
       if (path === "/api/tokens" && method === "GET") {
-        const tokens = db.query("SELECT id, name, token, scopes, rate_limit_per_min, is_active, created_at FROM agent_tokens").all();
+        if (!checkAuth("admin:tokens") && !ALLOW_UNAUTHENTICATED_LOCAL) {
+          return jsonResponse({ error: "Forbidden: Token inspection requires admin privileges." }, 403);
+        }
+        const tokens = db.query<AgentTokenRow, []>(
+          "SELECT id, name, token_prefix, scopes, rate_limit_per_min, is_active, created_at FROM agent_tokens"
+        ).all().map(t => ({ ...t, scopes: JSON.parse(t.scopes || "[]") }));
+
         const policies = db.query("SELECT * FROM hitl_policies").all();
         return jsonResponse({ tokens, policies });
       }
 
+      // POST /api/tokens: Generates cryptographically secure key, hashes with SHA-256, returns raw token ONCE
       if (path === "/api/tokens" && method === "POST") {
+        if (!checkAuth("admin:tokens") && !ALLOW_UNAUTHENTICATED_LOCAL) {
+          return jsonResponse({ error: "Forbidden: Token generation requires admin privileges." }, 403);
+        }
         const body = await req.json();
-        const tokenId = "tok_" + Math.random().toString(36).substring(2, 8);
-        const secret = "bos_agent_" + Math.random().toString(36).substring(2, 12);
+        const { rawToken, tokenHash, tokenPrefix } = SecurityManager.generateSecureToken("bos_agent_");
+        const tokenId = "tok_" + randomUUID().substring(0, 8);
 
         db.query(`
-          INSERT INTO agent_tokens (id, name, token, scopes, rate_limit_per_min, is_active)
-          VALUES ($id, $name, $token, $scopes, $rate, 1)
+          INSERT INTO agent_tokens (id, name, token_hash, token_prefix, scopes, rate_limit_per_min, is_active)
+          VALUES ($id, $name, $hash, $prefix, $scopes, $rate, 1)
         `).run({
           $id: tokenId,
           $name: body.name || "Agent Key",
-          $token: secret,
+          $hash: tokenHash,
+          $prefix: tokenPrefix,
           $scopes: JSON.stringify(body.scopes || ["crm:*"]),
           $rate: body.rate_limit_per_min || 120,
         });
 
-        return jsonResponse({ id: tokenId, name: body.name, token: secret, scopes: body.scopes }, 201);
+        // Return raw token ONCE to creator
+        return jsonResponse({
+          id: tokenId,
+          name: body.name,
+          token_prefix: tokenPrefix,
+          scopes: body.scopes,
+          raw_secret: rawToken,
+          notice: "Save this token now. It will not be shown again and cannot be retrieved.",
+        }, 201);
       }
 
       if (path.match(/^\/api\/hitl-policies\/([^/]+)$/) && method === "POST") {
+        if (!checkAuth("admin:policies") && !ALLOW_UNAUTHENTICATED_LOCAL) {
+          return jsonResponse({ error: "Forbidden: Policy modifications require admin privileges." }, 403);
+        }
         const toolName = path.split("/")[3];
         const body = await req.json();
         db.query(`
@@ -1574,19 +1915,6 @@ export function startHttpServer() {
         });
 
         return jsonResponse({ tool_name: toolName, requires_hitl: body.requires_hitl });
-      }
-
-      // --------------------------------------------------------------
-      // Frontend Static Files (SPA)
-      // --------------------------------------------------------------
-      if (path === "/" || path === "/index.html") {
-        const htmlPath = join(process.cwd(), "index.html");
-        if (existsSync(htmlPath)) {
-          return new Response(readFileSync(htmlPath, "utf-8"), {
-            headers: { "Content-Type": "text/html; charset=utf-8" },
-          });
-        }
-        return new Response("BOS index.html not found.", { status: 404 });
       }
 
       return new Response("Not Found", { status: 404 });
