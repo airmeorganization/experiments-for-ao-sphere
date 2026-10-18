@@ -1,0 +1,1406 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BOS // Business Operating System</title>
+  
+  <!-- Fonts & Icons -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+          colors: {
+            brand: {
+              50: '#f0f9ff',
+              400: '#38bdf8',
+              500: '#0ea5e9',
+              600: '#0284c7',
+            },
+            surface: {
+              950: '#090a0f',
+              900: '#0f111a',
+              850: '#151824',
+              800: '#1c2030',
+              700: '#282e45',
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    /* Custom scrollbars & sleek glassmorphism */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.12); border-radius: 9999px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.22); }
+    .glass-nav { background: rgba(15, 17, 26, 0.75); backdrop-filter: blur(12px); }
+    .glass-panel { background: rgba(21, 24, 36, 0.65); backdrop-filter: blur(8px); border: 1px solid rgba(255, 255, 255, 0.07); }
+    .kbd-chip { background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 4px; padding: 2px 5px; font-size: 11px; }
+  </style>
+</head>
+
+<body class="bg-surface-950 text-slate-200 font-sans min-h-screen antialiased flex flex-col selection:bg-brand-500/30 selection:text-brand-400">
+
+  <!-- ==================================================================== -->
+  <!-- TOP OMNI-BAR & HEADER -->
+  <!-- ==================================================================== -->
+  <header class="h-14 border-b border-white/5 glass-nav px-4 flex items-center justify-between sticky top-0 z-40">
+    <div class="flex items-center gap-3">
+      <div class="h-8 w-8 rounded-lg bg-gradient-to-tr from-cyan-600 to-indigo-600 flex items-center justify-center font-bold text-white shadow-lg shadow-cyan-500/20 text-sm tracking-wider">
+        Ω
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="font-semibold text-white tracking-tight">BOS</span>
+        <span class="text-xs px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono flex items-center gap-1.5">
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+          WAL-ACTIVE
+        </span>
+      </div>
+    </div>
+
+    <!-- Center Cmd+K Omni-Bar Trigger -->
+    <button onclick="openOmniBar()" class="w-96 max-w-md h-9 px-3 rounded-lg bg-surface-850 hover:bg-surface-800 border border-white/10 flex items-center justify-between text-xs text-slate-400 transition-all shadow-inner group">
+      <span class="flex items-center gap-2">
+        <i data-lucide="search" class="w-3.5 h-3.5 text-slate-400 group-hover:text-white transition-colors"></i>
+        <span>Search deals, SKUs, entities, or type command...</span>
+      </span>
+      <span class="flex items-center gap-1 text-[11px] font-mono text-slate-400">
+        <kbd class="kbd-chip">⌘</kbd><kbd class="kbd-chip">K</kbd>
+      </span>
+    </button>
+
+    <!-- Right Quick Actions & System Status -->
+    <div class="flex items-center gap-3">
+      <div class="hidden sm:flex items-center gap-2 text-xs text-slate-400 font-mono border-r border-white/10 pr-3">
+        <span class="text-slate-400">MCP:</span>
+        <span class="text-cyan-400">stdio / sse</span>
+      </div>
+      <button onclick="triggerQuickSync()" title="Force Sync Local Listings & Data" class="p-1.5 rounded-md hover:bg-surface-800 text-slate-400 hover:text-white transition">
+        <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+      </button>
+      <div class="h-7 w-7 rounded-full bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center text-xs font-semibold text-white ring-1 ring-white/20">
+        OP
+      </div>
+    </div>
+  </header>
+
+  <!-- ==================================================================== -->
+  <!-- MAIN APP CONTAINER (5-TAB LEFT RAIL + DYNAMIC WORKSPACE) -->
+  <!-- ==================================================================== -->
+  <div class="flex-1 flex overflow-hidden">
+
+    <!-- Left Rail Nav (Linear/Notion Inspired) -->
+    <aside class="w-60 border-r border-white/5 bg-surface-900 flex flex-col justify-between select-none">
+      <div class="p-3 space-y-6">
+        
+        <!-- Pillar Quick Switch -->
+        <div>
+          <div class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider px-3 mb-2 font-mono">
+            Navigation
+          </div>
+          <nav class="space-y-1">
+            <!-- Tab 1: Inbox -->
+            <button onclick="switchView('inbox')" id="nav-inbox" class="nav-item w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium text-white bg-surface-800/80 border border-white/5 transition-all">
+              <span class="flex items-center gap-2.5">
+                <i data-lucide="inbox" class="w-4 h-4 text-amber-400"></i>
+                <span>Action Inbox</span>
+              </span>
+              <span id="badge-inbox-count" class="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                3
+              </span>
+            </button>
+
+            <!-- Tab 2: Universal Canvas -->
+            <button onclick="switchView('canvas')" id="nav-canvas" class="nav-item w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-surface-850 transition-all">
+              <span class="flex items-center gap-2.5">
+                <i data-lucide="kanban" class="w-4 h-4 text-cyan-400"></i>
+                <span>Universal Canvas</span>
+              </span>
+              <span class="text-[10px] font-mono text-slate-400">Deals/SKUs</span>
+            </button>
+
+            <!-- Tab 3: Docs & Channels -->
+            <button onclick="switchView('docs')" id="nav-docs" class="nav-item w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-surface-850 transition-all">
+              <span class="flex items-center gap-2.5">
+                <i data-lucide="file-text" class="w-4 h-4 text-purple-400"></i>
+                <span>Docs & Channels</span>
+              </span>
+              <span class="text-[10px] font-mono text-slate-400">Wiki+Chat</span>
+            </button>
+
+            <!-- Tab 4: Business Pulse -->
+            <button onclick="switchView('pulse')" id="nav-pulse" class="nav-item w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-surface-850 transition-all">
+              <span class="flex items-center gap-2.5">
+                <i data-lucide="activity" class="w-4 h-4 text-emerald-400"></i>
+                <span>Business Pulse</span>
+              </span>
+              <span class="text-[10px] font-mono text-emerald-400">P&L Live</span>
+            </button>
+
+            <!-- Tab 5: MCP & Agent Hub -->
+            <button onclick="switchView('mcp')" id="nav-mcp" class="nav-item w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-surface-850 transition-all">
+              <span class="flex items-center gap-2.5">
+                <i data-lucide="bot" class="w-4 h-4 text-rose-400"></i>
+                <span>MCP & Agent Hub</span>
+              </span>
+              <span class="text-[10px] font-mono text-rose-400">HITL</span>
+            </button>
+          </nav>
+        </div>
+
+        <!-- System Guardrails Mini Status -->
+        <div class="px-3 py-3 rounded-lg bg-surface-850/60 border border-white/5 text-xs space-y-2">
+          <div class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider font-mono">Autonomous State</div>
+          <div class="flex items-center justify-between text-[11px]">
+            <span class="text-slate-400">HITL Staging</span>
+            <span class="text-emerald-400 font-mono">Enforced</span>
+          </div>
+          <div class="flex items-center justify-between text-[11px]">
+            <span class="text-slate-400">Auto-Reorder POs</span>
+            <span class="text-cyan-400 font-mono">Trigger Active</span>
+          </div>
+          <div class="flex items-center justify-between text-[11px]">
+            <span class="text-slate-400">Ledger Verification</span>
+            <span class="text-purple-400 font-mono">Balanced</span>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Left Rail Footer -->
+      <div class="p-3 border-t border-white/5 text-[11px] text-slate-400 font-mono flex items-center justify-between">
+        <span>SQLite WAL • 5 Primitives</span>
+        <span class="text-slate-400">v2.0</span>
+      </div>
+    </aside>
+
+    <!-- Dynamic Workspace Container -->
+    <main class="flex-1 bg-surface-950 overflow-y-auto p-6 relative">
+
+      <!-- ============================================================== -->
+      <!-- VIEW 1: INBOX (ACTION & APPROVAL STREAM) -->
+      <!-- ============================================================== -->
+      <section id="view-inbox" class="view-panel max-w-6xl mx-auto space-y-6">
+        <!-- Header -->
+        <div class="flex items-center justify-between">
+          <div>
+            <h1 class="text-xl font-bold text-white tracking-tight flex items-center gap-2">
+              Action & Approval Inbox
+              <span class="text-xs px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 font-mono">HITL Guardrail</span>
+            </h1>
+            <p class="text-xs text-slate-400 mt-1">
+              Autonomous AI agents stage high-stakes financial, operational, and public actions here for human verification.
+            </p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button onclick="loadStagedActions()" class="px-3 py-1.5 rounded-lg bg-surface-850 hover:bg-surface-800 text-xs text-slate-300 font-medium border border-white/10 flex items-center gap-1.5 transition">
+              <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Refresh
+            </button>
+          </div>
+        </div>
+
+        <!-- Urgent System Alerts Row -->
+        <div id="inbox-alerts" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <!-- Low Stock Alert Banner -->
+          <div class="p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 flex items-start justify-between">
+            <div class="flex items-start gap-3">
+              <div class="p-2 rounded-lg bg-rose-500/20 text-rose-400 mt-0.5">
+                <i data-lucide="alert-triangle" class="w-4 h-4"></i>
+              </div>
+              <div>
+                <h2 class="text-xs font-semibold text-rose-200">Critical Low Stock Detected</h2>
+                <p class="text-[11px] text-rose-300/80 mt-0.5" id="alert-low-stock-text">
+                  SKU <strong>HW-SRV-01</strong> (Edge Server) is at 4 units (Threshold: 10).
+                </p>
+              </div>
+            </div>
+            <button onclick="switchView('canvas', 'inventory')" class="text-xs px-2.5 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 font-mono">
+              View SKU &rarr;
+            </button>
+          </div>
+
+          <!-- Urgent Negative Review Banner -->
+          <div class="p-4 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-start justify-between">
+            <div class="flex items-start gap-3">
+              <div class="p-2 rounded-lg bg-amber-500/20 text-amber-400 mt-0.5">
+                <i data-lucide="message-square" class="w-4 h-4"></i>
+              </div>
+              <div>
+                <h2 class="text-xs font-semibold text-amber-200">Urgent Reputation Action Required</h2>
+                <p class="text-[11px] text-amber-300/80 mt-0.5" id="alert-urgent-review-text">
+                  Trustpilot 2-star review (-0.82 sentiment) regarding PO-2026-044. AI reply drafted.
+                </p>
+              </div>
+            </div>
+            <button onclick="switchView('mcp')" class="text-xs px-2.5 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 font-mono">
+              Inspect &rarr;
+            </button>
+          </div>
+        </div>
+
+        <!-- Pending Staged Actions List -->
+        <div class="space-y-4">
+          <div class="flex items-center justify-between text-xs text-slate-400 font-mono px-1">
+            <span>STAGED AUTONOMOUS ACTIONS PENDING OPERATOR SIGN-OFF</span>
+            <span id="staged-queue-counter">3 pending</span>
+          </div>
+
+          <div id="staged-actions-list" class="space-y-3">
+            <!-- Staged cards populated dynamically -->
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================== -->
+      <!-- VIEW 2: UNIVERSAL CANVAS (PIPELINES & GRIDS) -->
+      <!-- ============================================================== -->
+      <section id="view-canvas" class="view-panel max-w-7xl mx-auto space-y-6 hidden">
+        <!-- Canvas Header & Dynamic Switchers -->
+        <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-white/5 pb-4">
+          <div>
+            <h1 class="text-xl font-bold text-white tracking-tight flex items-center gap-2">
+              Universal Canvas
+              <span class="text-xs text-slate-400 font-mono font-normal">Single Dynamic Table for all 10 Modules</span>
+            </h1>
+            <p class="text-xs text-slate-400 mt-0.5">
+              Filter across Deals, Inventory SKUs, Project Tasks, Shifts, and Ledger Invoices without switching tables.
+            </p>
+          </div>
+
+          <!-- Filter Category Tabs & View Layout Switcher -->
+          <div class="flex items-center gap-3">
+            <!-- Filter Pills -->
+            <div class="flex items-center p-1 rounded-lg bg-surface-850 border border-white/10 text-xs">
+              <button onclick="setCanvasFilter('all')" id="btn-cat-all" class="cat-btn px-2.5 py-1 rounded bg-surface-700 text-white font-medium">All</button>
+              <button onclick="setCanvasFilter('deals')" id="btn-cat-deals" class="cat-btn px-2.5 py-1 rounded text-slate-400 hover:text-white">Deals</button>
+              <button onclick="setCanvasFilter('inventory')" id="btn-cat-inventory" class="cat-btn px-2.5 py-1 rounded text-slate-400 hover:text-white">Inventory SKUs</button>
+              <button onclick="setCanvasFilter('tasks')" id="btn-cat-tasks" class="cat-btn px-2.5 py-1 rounded text-slate-400 hover:text-white">Tasks</button>
+              <button onclick="setCanvasFilter('shifts')" id="btn-cat-shifts" class="cat-btn px-2.5 py-1 rounded text-slate-400 hover:text-white">Shifts</button>
+              <button onclick="setCanvasFilter('invoices')" id="btn-cat-invoices" class="cat-btn px-2.5 py-1 rounded text-slate-400 hover:text-white">Ledger</button>
+            </div>
+
+            <!-- View Layout Mode Toggle: Kanban vs Grid Table vs Calendar -->
+            <div class="flex items-center p-1 rounded-lg bg-surface-850 border border-white/10 text-xs">
+              <button onclick="setCanvasViewMode('kanban')" id="mode-kanban" title="Kanban Board" class="mode-btn p-1.5 rounded bg-surface-700 text-cyan-400">
+                <i data-lucide="columns-3" class="w-4 h-4"></i>
+              </button>
+              <button onclick="setCanvasViewMode('grid')" id="mode-grid" title="Data Table" class="mode-btn p-1.5 rounded text-slate-400 hover:text-white">
+                <i data-lucide="table" class="w-4 h-4"></i>
+              </button>
+              <button onclick="setCanvasViewMode('calendar')" id="mode-calendar" title="Calendar Timeline" class="mode-btn p-1.5 rounded text-slate-400 hover:text-white">
+                <i data-lucide="calendar" class="w-4 h-4"></i>
+              </button>
+            </div>
+
+            <button onclick="openNewItemModal()" class="px-3 py-1.5 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-xs font-semibold flex items-center gap-1.5 shadow-lg shadow-brand-500/20">
+              <i data-lucide="plus" class="w-3.5 h-3.5"></i> New Item
+            </button>
+          </div>
+        </div>
+
+        <!-- Dynamic Container for Kanban / Grid / Calendar -->
+        <div id="canvas-content-container" class="min-h-[500px]">
+          <!-- Injected via Javascript -->
+        </div>
+      </section>
+
+      <!-- ============================================================== -->
+      <!-- VIEW 3: DOCS & CHANNELS -->
+      <!-- ============================================================== -->
+      <section id="view-docs" class="view-panel max-w-7xl mx-auto h-full flex flex-col space-y-4 hidden">
+        <div class="flex items-center justify-between border-b border-white/5 pb-3">
+          <div>
+            <h1 class="text-xl font-bold text-white tracking-tight flex items-center gap-2">
+              Workplace Productivity: Docs & Channels
+            </h1>
+            <p class="text-xs text-slate-400 mt-0.5">Split-pane Markdown wiki knowledge base and team channels with instant video call generation.</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button onclick="generateVideoMeeting()" class="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium flex items-center gap-1.5 shadow-lg shadow-indigo-600/20">
+              <i data-lucide="video" class="w-3.5 h-3.5"></i> Instant Video Meeting
+            </button>
+          </div>
+        </div>
+
+        <div class="flex-1 grid grid-cols-12 gap-6 min-h-[550px]">
+          <!-- Channel & Doc Sidebar -->
+          <div class="col-span-12 md:col-span-3 rounded-xl bg-surface-900 border border-white/5 p-4 flex flex-col justify-between">
+            <div class="space-y-4">
+              <div>
+                <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider font-mono">Team Channels</span>
+                <div class="mt-2 space-y-1">
+                  <button onclick="selectChannel('#general')" class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-medium text-white bg-surface-800 flex items-center gap-2">
+                    <span class="text-slate-400 font-mono">#</span> general
+                  </button>
+                  <button onclick="selectChannel('#announcements')" class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-surface-850 flex items-center gap-2">
+                    <span class="text-slate-400 font-mono">#</span> announcements
+                  </button>
+                  <button onclick="selectChannel('#dev')" class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-surface-850 flex items-center gap-2">
+                    <span class="text-slate-400 font-mono">#</span> dev-ops
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider font-mono">Wiki & Runbooks</span>
+                <div class="mt-2 space-y-1">
+                  <button onclick="loadWikiDoc('blk_doc_runbook')" class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-300 hover:text-white hover:bg-surface-850 flex items-center gap-2">
+                    <i data-lucide="book-open" class="w-3.5 h-3.5 text-purple-400"></i> Zero-Downtime SQLite
+                  </button>
+                  <button onclick="loadWikiDoc('blk_nap_master')" class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-300 hover:text-white hover:bg-surface-850 flex items-center gap-2">
+                    <i data-lucide="map-pin" class="w-3.5 h-3.5 text-emerald-400"></i> Business NAP Master
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Instant Video Link Card -->
+            <div id="video-link-card" class="p-3 rounded-lg bg-surface-850 border border-white/5 text-xs hidden">
+              <span class="text-[10px] text-slate-400 font-mono uppercase">Active Meeting Room</span>
+              <a id="video-room-url" href="#" target="_blank" class="block text-brand-400 font-mono mt-1 truncate hover:underline">
+                https://meet.jit.si/bos-room-882
+              </a>
+              <button onclick="copyVideoLink()" class="mt-2 w-full py-1 rounded bg-brand-500/20 text-brand-300 font-medium text-[11px] hover:bg-brand-500/30 transition">
+                Copy Link to Channel
+              </button>
+            </div>
+          </div>
+
+          <!-- Split-Pane Main Content: Chat Feed OR Markdown Document Editor -->
+          <div class="col-span-12 md:col-span-9 rounded-xl bg-surface-900 border border-white/5 flex flex-col overflow-hidden">
+            <!-- Chat Mode View -->
+            <div id="chat-mode-container" class="flex-1 flex flex-col">
+              <div class="h-11 border-b border-white/5 px-4 flex items-center justify-between bg-surface-850/50">
+                <span class="text-xs font-semibold text-white flex items-center gap-1.5">
+                  <span class="text-slate-400">#</span> <span id="current-channel-title">general</span>
+                </span>
+                <span class="text-[11px] text-slate-400 font-mono">2 participants • SQLite synced</span>
+              </div>
+              <div id="chat-messages-stream" class="flex-1 p-4 space-y-3 overflow-y-auto">
+                <!-- Chat messages injected here -->
+              </div>
+              <div class="p-3 border-t border-white/5 bg-surface-850/50">
+                <form onsubmit="sendChatMessage(event)" class="flex gap-2">
+                  <input id="chat-input" type="text" placeholder="Type a message or paste a meeting link..." class="flex-1 bg-surface-950 border border-white/10 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-brand-500" />
+                  <button type="submit" class="px-4 py-2 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-xs font-semibold">Send</button>
+                </form>
+              </div>
+            </div>
+
+            <!-- Doc Mode View (Hidden by default) -->
+            <div id="doc-mode-container" class="flex-1 flex flex-col hidden p-6 overflow-y-auto">
+              <div class="flex items-center justify-between pb-4 border-b border-white/5">
+                <h2 id="doc-title-display" class="text-lg font-bold text-white">Document Title</h2>
+                <button onclick="toggleDocEditMode()" class="px-3 py-1 rounded bg-surface-800 hover:bg-surface-700 text-xs text-slate-300 font-mono">
+                  Edit Markdown
+                </button>
+              </div>
+              <div id="doc-markdown-body" class="prose prose-invert prose-sm max-w-none mt-4 text-slate-300">
+                <!-- Rendered markdown preview -->
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================== -->
+      <!-- VIEW 4: BUSINESS PULSE (EXECUTIVE DASHBOARD) -->
+      <!-- ============================================================== -->
+      <section id="view-pulse" class="view-panel max-w-6xl mx-auto space-y-6 hidden">
+        <div>
+          <h1 class="text-xl font-bold text-white tracking-tight flex items-center gap-2">
+            Business Pulse Executive Dashboard
+            <span class="text-xs px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">Zero-Latency P&L</span>
+          </h1>
+          <p class="text-xs text-slate-400 mt-1">Real-time metrics aggregated directly from immutable double-entry ledger entries and pipeline states.</p>
+        </div>
+
+        <!-- 4 Core Real-Time KPI Cards -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <!-- Card 1: Cash Flow & P&L -->
+          <div class="p-5 rounded-xl bg-surface-900 border border-white/5 space-y-2">
+            <div class="flex items-center justify-between text-xs text-slate-400 font-mono">
+              <span>NET P&L (MTD)</span>
+              <i data-lucide="trending-up" class="w-4 h-4 text-emerald-400"></i>
+            </div>
+            <div id="kpi-net-pnl" class="text-2xl font-bold text-emerald-400 tracking-tight">$0.00</div>
+            <div class="text-[11px] text-slate-400 flex items-center justify-between">
+              <span>Cash Balance:</span>
+              <span id="kpi-cash-balance" class="font-mono text-slate-200 font-semibold">$0.00</span>
+            </div>
+          </div>
+
+          <!-- Card 2: Inventory Health -->
+          <div class="p-5 rounded-xl bg-surface-900 border border-white/5 space-y-2">
+            <div class="flex items-center justify-between text-xs text-slate-400 font-mono">
+              <span>INVENTORY HEALTH</span>
+              <i data-lucide="package" class="w-4 h-4 text-cyan-400"></i>
+            </div>
+            <div id="kpi-inventory-health" class="text-2xl font-bold text-white tracking-tight">1 Low Stock</div>
+            <div class="text-[11px] text-slate-400 flex items-center justify-between">
+              <span>Auto-PO Trigger:</span>
+              <span class="text-emerald-400 font-mono">Online</span>
+            </div>
+          </div>
+
+          <!-- Card 3: Pipeline Velocity -->
+          <div class="p-5 rounded-xl bg-surface-900 border border-white/5 space-y-2">
+            <div class="flex items-center justify-between text-xs text-slate-400 font-mono">
+              <span>PIPELINE VALUE</span>
+              <i data-lucide="dollar-sign" class="w-4 h-4 text-purple-400"></i>
+            </div>
+            <div id="kpi-pipeline-val" class="text-2xl font-bold text-purple-400 tracking-tight">$70,500.00</div>
+            <div class="text-[11px] text-slate-400 flex items-center justify-between">
+              <span>Active Deals:</span>
+              <span id="kpi-active-deals-count" class="font-mono text-slate-200">2 In Progress</span>
+            </div>
+          </div>
+
+          <!-- Card 4: Reputation & Reviews -->
+          <div class="p-5 rounded-xl bg-surface-900 border border-white/5 space-y-2">
+            <div class="flex items-center justify-between text-xs text-slate-400 font-mono">
+              <span>REPUTATION SCORE</span>
+              <i data-lucide="star" class="w-4 h-4 text-amber-400"></i>
+            </div>
+            <div id="kpi-reputation-score" class="text-2xl font-bold text-amber-400 tracking-tight">4.2 / 5.0</div>
+            <div class="text-[11px] text-slate-400 flex items-center justify-between">
+              <span>Urgent Negative:</span>
+              <span id="kpi-urgent-reviews-count" class="text-rose-400 font-mono font-semibold">1 Action Staged</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Financial Breakdown & Low-Stock Alerts Row -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <!-- Real-Time Double-Entry P&L Summary -->
+          <div class="p-5 rounded-xl bg-surface-900 border border-white/5 space-y-4">
+            <div class="flex items-center justify-between">
+              <h2 class="text-xs font-semibold text-white uppercase tracking-wider font-mono">Double-Entry Financial Ledger</h2>
+              <span class="text-[10px] text-emerald-400 font-mono">Audited Posted Records</span>
+            </div>
+            <div class="space-y-2 text-xs">
+              <div class="flex justify-between py-1.5 border-b border-white/5">
+                <span class="text-slate-400">Recognized Revenue (Invoices/E-com)</span>
+                <span id="ledger-revenue" class="font-mono text-white font-medium">$8,500.00</span>
+              </div>
+              <div class="flex justify-between py-1.5 border-b border-white/5">
+                <span class="text-slate-400">Operating & Payroll Expenses</span>
+                <span id="ledger-expenses" class="font-mono text-rose-400 font-medium">($14,500.00)</span>
+              </div>
+              <div class="flex justify-between py-1.5 border-b border-white/5">
+                <span class="text-slate-400">Inventory Asset Additions</span>
+                <span id="ledger-inventory" class="font-mono text-cyan-400 font-medium">$5,500.00</span>
+              </div>
+              <div class="flex justify-between py-2 font-semibold">
+                <span class="text-white">Net Cash Balance</span>
+                <span id="ledger-net-cash" class="font-mono text-emerald-400">$20,000.00</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Reputation & Review Sentiment Feed -->
+          <div class="p-5 rounded-xl bg-surface-900 border border-white/5 space-y-4">
+            <div class="flex items-center justify-between">
+              <h2 class="text-xs font-semibold text-white uppercase tracking-wider font-mono">Customer Reputation Feed</h2>
+              <span class="text-[10px] text-slate-400 font-mono">Google Maps & Trustpilot</span>
+            </div>
+            <div id="pulse-reviews-feed" class="space-y-3">
+              <!-- Populated dynamically -->
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================== -->
+      <!-- VIEW 5: MCP & AGENT HUB (CONTROL PANEL & AUDIT LOGS) -->
+      <!-- ============================================================== -->
+      <section id="view-mcp" class="view-panel max-w-6xl mx-auto space-y-6 hidden">
+        <div>
+          <h1 class="text-xl font-bold text-white tracking-tight flex items-center gap-2">
+            MCP & Autonomous Agent Hub
+            <span class="text-xs px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/20 font-mono">Security & Audit</span>
+          </h1>
+          <p class="text-xs text-slate-400 mt-1">Configure Model Context Protocol connection endpoints, manage scoped RBAC keys, toggle HITL policies, and perform 1-click time-travel rollbacks.</p>
+        </div>
+
+        <!-- Connection Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <!-- Stdio Config Card -->
+          <div class="p-4 rounded-xl bg-surface-900 border border-white/5 space-y-3">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-semibold text-white flex items-center gap-2">
+                <i data-lucide="terminal" class="w-4 h-4 text-cyan-400"></i>
+                Local STDIO Agent Config
+              </span>
+              <button onclick="copySnippet('stdio-config')" class="text-[11px] text-brand-400 hover:underline font-mono">Copy JSON</button>
+            </div>
+            <pre id="stdio-config" class="p-3 rounded-lg bg-surface-950 border border-white/5 text-[11px] font-mono text-slate-300 overflow-x-auto leading-relaxed">{
+  "mcpServers": {
+    "bos-unified": {
+      "command": "bun",
+      "args": ["run", "/path/to/server.ts", "--stdio"]
+    }
+  }
+}</pre>
+          </div>
+
+          <!-- Remote SSE Config Card -->
+          <div class="p-4 rounded-xl bg-surface-900 border border-white/5 space-y-3">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-semibold text-white flex items-center gap-2">
+                <i data-lucide="wifi" class="w-4 h-4 text-emerald-400"></i>
+                Cloud SSE Streaming Endpoint
+              </span>
+              <button onclick="copySnippet('sse-config')" class="text-[11px] text-brand-400 hover:underline font-mono">Copy URL</button>
+            </div>
+            <div id="sse-config" class="p-3 rounded-lg bg-surface-950 border border-white/5 text-[11px] font-mono text-emerald-400 flex items-center justify-between">
+              <span>http://localhost:8080/mcp/sse</span>
+              <span class="text-slate-400">HTTP/SSE</span>
+            </div>
+            <p class="text-[11px] text-slate-400">Send tool call JSON-RPC packets via POST to <code class="text-slate-300">/mcp/messages?sessionId=...</code> with Bearer token authentication.</p>
+          </div>
+        </div>
+
+        <!-- Per-Tool HITL Enforcement Toggles -->
+        <div class="p-5 rounded-xl bg-surface-900 border border-white/5 space-y-4">
+          <div class="flex items-center justify-between">
+            <div>
+              <h2 class="text-xs font-semibold text-white uppercase tracking-wider font-mono">Human-in-the-Loop (HITL) Guardrail Policies</h2>
+              <p class="text-[11px] text-slate-400 mt-0.5">Toggle whether an autonomous AI agent requires human sign-off in the Inbox before tool execution.</p>
+            </div>
+          </div>
+          <div id="hitl-policies-grid" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+            <!-- Dynamic policies -->
+          </div>
+        </div>
+
+        <!-- Live Immutable Audit Logs Stream with 1-Click Rollback -->
+        <div class="p-5 rounded-xl bg-surface-900 border border-white/5 space-y-4">
+          <div class="flex items-center justify-between">
+            <div>
+              <h2 class="text-xs font-semibold text-white uppercase tracking-wider font-mono">Time-Travel Audit Stream</h2>
+              <p class="text-[11px] text-slate-400 mt-0.5">Immutable record of every state modification. Click 'Undo' to trigger instantaneous reverse rollback.</p>
+            </div>
+            <button onclick="loadAuditLogs()" class="text-xs text-slate-400 hover:text-white flex items-center gap-1 font-mono">
+              <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Refresh Stream
+            </button>
+          </div>
+
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-xs">
+              <thead class="border-b border-white/10 text-slate-400 font-mono text-[10px] uppercase">
+                <tr>
+                  <th class="py-2 px-3">Audit ID</th>
+                  <th class="py-2 px-3">Actor</th>
+                  <th class="py-2 px-3">Tool / Action</th>
+                  <th class="py-2 px-3">Table (Target)</th>
+                  <th class="py-2 px-3">Action Type</th>
+                  <th class="py-2 px-3">Timestamp</th>
+                  <th class="py-2 px-3 text-right">Time-Travel</th>
+                </tr>
+              </thead>
+              <tbody id="audit-logs-tbody" class="divide-y divide-white/5 font-mono">
+                <!-- Dynamically loaded -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- ==================================================================== -->
+  <!-- 360-DEGREE SLIDE-OVER DRAWER -->
+  <!-- ==================================================================== -->
+  <div id="slide-over-drawer" class="fixed inset-y-0 right-0 w-full max-w-lg bg-surface-900 border-l border-white/10 shadow-2xl z-50 transform translate-x-full transition-transform duration-300 ease-in-out flex flex-col">
+    <!-- Drawer Header -->
+    <div class="p-5 border-b border-white/10 flex items-center justify-between bg-surface-850">
+      <div class="flex items-center gap-3">
+        <div id="drawer-avatar" class="w-9 h-9 rounded-full bg-brand-500/20 text-brand-400 flex items-center justify-center font-bold text-sm">
+          AG
+        </div>
+        <div>
+          <h2 id="drawer-entity-name" class="text-sm font-bold text-white">Entity 360 View</h2>
+          <span id="drawer-entity-role" class="text-[10px] px-2 py-0.5 rounded font-mono uppercase bg-white/5 text-slate-400">Customer</span>
+        </div>
+      </div>
+      <button onclick="closeDrawer()" class="p-1 rounded-md text-slate-400 hover:text-white hover:bg-surface-800">
+        <i data-lucide="x" class="w-5 h-5"></i>
+      </button>
+    </div>
+
+    <!-- Drawer Content (Scrollable) -->
+    <div class="flex-1 overflow-y-auto p-5 space-y-6 text-xs">
+      <!-- Contact Info -->
+      <div class="space-y-2">
+        <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider font-mono">Contact Details</span>
+        <div class="p-3 rounded-lg bg-surface-950 border border-white/5 space-y-1.5 font-mono text-slate-300">
+          <div class="flex justify-between">
+            <span class="text-slate-400">Email:</span>
+            <span id="drawer-email" class="text-white">procurement@apexcorp.io</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-slate-400">Phone:</span>
+            <span id="drawer-phone" class="text-white">+1-415-555-0199</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-slate-400">Status:</span>
+            <span id="drawer-status" class="text-emerald-400">Active</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Pipeline Deals & Orders -->
+      <div class="space-y-2">
+        <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider font-mono">Pipeline States (Deals / Orders)</span>
+        <div id="drawer-pipeline-records" class="space-y-2">
+          <!-- Populated -->
+        </div>
+      </div>
+
+      <!-- Financial Ledger History -->
+      <div class="space-y-2">
+        <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider font-mono">Ledger History (Debits / Credits)</span>
+        <div id="drawer-financial-records" class="space-y-2 font-mono text-[11px]">
+          <!-- Populated -->
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================================================================== -->
+  <!-- CMD + K COMMAND PALETTE MODAL -->
+  <!-- ==================================================================== -->
+  <dialog id="omni-bar-dialog" class="backdrop:bg-black/80 bg-transparent p-0 m-0 w-full h-full max-w-none max-h-none fixed inset-0 z-50 flex items-start justify-center pt-24">
+    <div class="w-full max-w-xl rounded-xl bg-surface-900 border border-white/10 shadow-2xl overflow-hidden glass-panel">
+      <div class="p-3 border-b border-white/10 flex items-center gap-3">
+        <i data-lucide="command" class="w-4 h-4 text-brand-400"></i>
+        <input id="omni-search-input" oninput="handleOmniSearch(this.value)" type="text" placeholder="Type a command or search across BOS..." class="w-full bg-transparent text-sm text-white focus:outline-none placeholder-slate-400" autofocus />
+        <kbd class="kbd-chip text-slate-400">ESC</kbd>
+      </div>
+
+      <div id="omni-results-container" class="max-h-80 overflow-y-auto p-2 space-y-1 text-xs">
+        <!-- Quick Commands -->
+        <div class="px-2 py-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wider font-mono">Navigation & Views</div>
+        <button onclick="switchView('inbox'); closeOmniBar();" class="w-full text-left px-3 py-2 rounded-lg hover:bg-surface-800 text-slate-200 flex items-center justify-between">
+          <span class="flex items-center gap-2"><i data-lucide="inbox" class="w-3.5 h-3.5 text-amber-400"></i> Jump to Action Inbox</span>
+          <span class="text-[10px] text-slate-400 font-mono">View 1</span>
+        </button>
+        <button onclick="switchView('canvas'); closeOmniBar();" class="w-full text-left px-3 py-2 rounded-lg hover:bg-surface-800 text-slate-200 flex items-center justify-between">
+          <span class="flex items-center gap-2"><i data-lucide="kanban" class="w-3.5 h-3.5 text-cyan-400"></i> Open Universal Canvas</span>
+          <span class="text-[10px] text-slate-400 font-mono">View 2</span>
+        </button>
+        <button onclick="switchView('pulse'); closeOmniBar();" class="w-full text-left px-3 py-2 rounded-lg hover:bg-surface-800 text-slate-200 flex items-center justify-between">
+          <span class="flex items-center gap-2"><i data-lucide="activity" class="w-3.5 h-3.5 text-emerald-400"></i> View Business Pulse</span>
+          <span class="text-[10px] text-slate-400 font-mono">View 4</span>
+        </button>
+
+        <div class="px-2 pt-2 py-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wider font-mono">AI Agent Tools & Actions</div>
+        <button onclick="quickAction('check_stock'); closeOmniBar();" class="w-full text-left px-3 py-2 rounded-lg hover:bg-surface-800 text-slate-200 flex items-center justify-between">
+          <span class="flex items-center gap-2"><i data-lucide="package-search" class="w-3.5 h-3.5 text-cyan-400"></i> Run Stock Check (inventory_check_stock)</span>
+          <span class="text-[10px] text-slate-400 font-mono">Auto Tool</span>
+        </button>
+        <button onclick="quickAction('draft_po'); closeOmniBar();" class="w-full text-left px-3 py-2 rounded-lg hover:bg-surface-800 text-slate-200 flex items-center justify-between">
+          <span class="flex items-center gap-2"><i data-lucide="shopping-cart" class="w-3.5 h-3.5 text-rose-400"></i> Stage Restock PO (erp_draft_purchase_order)</span>
+          <span class="text-[10px] text-rose-400 font-mono">HITL Tool</span>
+        </button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- ==================================================================== -->
+  <!-- JAVASCRIPT FRONTEND APPLICATION LOGIC -->
+  <!-- ==================================================================== -->
+  <script>
+    // State store
+    let currentView = 'inbox';
+    let currentFilter = 'all';
+    let currentViewMode = 'kanban';
+    let stagedActionsData = [];
+    let canvasItemsData = [];
+    let activeChannel = '#general';
+
+    // Initialize UI on load
+    document.addEventListener('DOMContentLoaded', () => {
+      lucide.createIcons();
+      loadStagedActions();
+      loadBusinessPulse();
+      loadCanvasItems();
+      loadAuditLogs();
+      loadHitlPolicies();
+      loadChatMessages();
+
+      // Keyboard shortcuts: Cmd+K / Ctrl+K
+      document.addEventListener('keydown', (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+          e.preventDefault();
+          openOmniBar();
+        }
+        if (e.key === 'Escape') {
+          closeOmniBar();
+          closeDrawer();
+        }
+      });
+    });
+
+    // ------------------------------------------------------------------
+    // View Switcher (5-Tab Left Rail)
+    // ------------------------------------------------------------------
+    function switchView(viewName, subCategory) {
+      currentView = viewName;
+      document.querySelectorAll('.view-panel').forEach(el => el.classList.add('hidden'));
+      document.querySelectorAll('.nav-item').forEach(el => {
+        el.classList.remove('bg-surface-800/80', 'text-white', 'border', 'border-white/5');
+        el.classList.add('text-slate-400');
+      });
+
+      const targetView = document.getElementById(`view-${viewName}`);
+      const targetNav = document.getElementById(`nav-${viewName}`);
+      if (targetView) targetView.classList.remove('hidden');
+      if (targetNav) {
+        targetNav.classList.add('bg-surface-800/80', 'text-white', 'border', 'border-white/5');
+        targetNav.classList.remove('text-slate-400');
+      }
+
+      if (viewName === 'canvas' && subCategory) {
+        setCanvasFilter(subCategory);
+      }
+      lucide.createIcons();
+    }
+
+    // ------------------------------------------------------------------
+    // Action Inbox & HITL Guardrails
+    // ------------------------------------------------------------------
+    async function loadStagedActions() {
+      try {
+        const res = await fetch('/api/staged-actions?status=pending');
+        const actions = await res.json();
+        stagedActionsData = actions;
+
+        const countBadge = document.getElementById('badge-inbox-count');
+        const counterText = document.getElementById('staged-queue-counter');
+        if (countBadge) countBadge.textContent = actions.length;
+        if (counterText) counterText.textContent = `${actions.length} pending`;
+
+        const listContainer = document.getElementById('staged-actions-list');
+        if (!listContainer) return;
+
+        if (actions.length === 0) {
+          listContainer.innerHTML = `
+            <div class="p-8 text-center rounded-xl bg-surface-900 border border-white/5">
+              <i data-lucide="check-circle" class="w-8 h-8 text-emerald-400 mx-auto mb-2"></i>
+              <h3 class="text-sm font-semibold text-white">All Staged Actions Cleared</h3>
+              <p class="text-xs text-slate-400 mt-1">Zero pending actions awaiting operator sign-off.</p>
+            </div>
+          `;
+          lucide.createIcons();
+          return;
+        }
+
+        listContainer.innerHTML = actions.map(action => {
+          const riskColor = action.risk_level === 'critical' ? 'text-purple-400 bg-purple-500/10 border-purple-500/30' :
+                            action.risk_level === 'high' ? 'text-rose-400 bg-rose-500/10 border-rose-500/30' :
+                            'text-amber-400 bg-amber-500/10 border-amber-500/30';
+
+          return `
+            <div class="p-4 rounded-xl bg-surface-900 border border-white/5 hover:border-white/10 transition space-y-3">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <span class="text-[10px] font-mono px-2 py-0.5 rounded border ${riskColor} uppercase font-semibold">
+                    ${action.risk_level} RISK
+                  </span>
+                  <span class="text-xs font-mono text-white font-medium">${action.tool_name}</span>
+                  <span class="text-[11px] text-slate-400 font-mono">by ${action.agent_id}</span>
+                </div>
+                <span class="text-[10px] font-mono text-slate-400">${new Date(action.created_at).toLocaleTimeString()}</span>
+              </div>
+
+              <p class="text-xs text-slate-300">${action.reasoning}</p>
+
+              <!-- Proposed Payload Preview -->
+              <div class="p-3 rounded-lg bg-surface-950 border border-white/5 text-[11px] font-mono text-slate-400 overflow-x-auto">
+                <span class="text-slate-400 text-[10px] block mb-1 uppercase">Proposed Autonomous Payload:</span>
+                <pre class="text-slate-200 leading-snug">${JSON.stringify(action.proposed_payload, null, 2)}</pre>
+              </div>
+
+              <!-- Action Buttons -->
+              <div class="flex items-center justify-end gap-2 pt-1 border-t border-white/5">
+                <button onclick="rejectAction('${action.id}')" class="px-3 py-1.5 rounded-lg hover:bg-rose-500/10 text-rose-400 hover:border-rose-500/30 border border-transparent text-xs font-medium transition">
+                  Reject
+                </button>
+                <button onclick="editActionPrompt('${action.id}')" class="px-3 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-300 text-xs font-medium border border-white/5 transition">
+                  Edit Payload
+                </button>
+                <button onclick="approveAction('${action.id}')" class="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-lg shadow-emerald-600/20 transition flex items-center gap-1.5">
+                  <i data-lucide="check" class="w-3.5 h-3.5"></i> Approve & Execute
+                </button>
+              </div>
+            </div>
+          `;
+        }).join('');
+
+        lucide.createIcons();
+      } catch (err) {
+        console.error("Failed to load staged actions:", err);
+      }
+    }
+
+    async function approveAction(actionId) {
+      try {
+        const res = await fetch(`/api/staged-actions/${actionId}/approve`, { method: 'POST' });
+        const result = await res.json();
+        notifyToast(`Action ${actionId} approved and executed successfully!`);
+        loadStagedActions();
+        loadBusinessPulse();
+        loadAuditLogs();
+      } catch (err) {
+        alert("Error approving action: " + err.message);
+      }
+    }
+
+    async function rejectAction(actionId) {
+      const note = prompt("Optional rejection note for the agent:", "Parameter values invalid");
+      if (note === null) return;
+      try {
+        await fetch(`/api/staged-actions/${actionId}/reject`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ note })
+        });
+        notifyToast(`Action ${actionId} rejected.`);
+        loadStagedActions();
+      } catch (err) {
+        alert("Error rejecting action: " + err.message);
+      }
+    }
+
+    function editActionPrompt(actionId) {
+      const action = stagedActionsData.find(a => a.id === actionId);
+      if (!action) return;
+      const updatedStr = prompt("Edit JSON payload before operator execution:", JSON.stringify(action.proposed_payload, null, 2));
+      if (!updatedStr) return;
+
+      try {
+        const updatedJson = JSON.parse(updatedStr);
+        fetch(`/api/staged-actions/${actionId}/edit`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ updated_payload: updatedJson })
+        }).then(() => {
+          notifyToast(`Action ${actionId} edited and executed.`);
+          loadStagedActions();
+          loadAuditLogs();
+        });
+      } catch (e) {
+        alert("Invalid JSON format.");
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // Universal Canvas (Kanban / Grid / Calendar)
+    // ------------------------------------------------------------------
+    async function loadCanvasItems() {
+      try {
+        const res = await fetch(`/api/canvas?category=${currentFilter}`);
+        canvasItemsData = await res.json();
+        renderCanvas();
+      } catch (err) {
+        console.error("Failed to load canvas items:", err);
+      }
+    }
+
+    function setCanvasFilter(cat) {
+      currentFilter = cat;
+      document.querySelectorAll('.cat-btn').forEach(btn => {
+        btn.classList.remove('bg-surface-700', 'text-white', 'font-medium');
+        btn.classList.add('text-slate-400');
+      });
+      const activeBtn = document.getElementById(`btn-cat-${cat}`);
+      if (activeBtn) {
+        activeBtn.classList.add('bg-surface-700', 'text-white', 'font-medium');
+        activeBtn.classList.remove('text-slate-400');
+      }
+      loadCanvasItems();
+    }
+
+    function setCanvasViewMode(mode) {
+      currentViewMode = mode;
+      document.querySelectorAll('.mode-btn').forEach(btn => {
+        btn.classList.remove('bg-surface-700', 'text-cyan-400');
+        btn.classList.add('text-slate-400');
+      });
+      const activeBtn = document.getElementById(`mode-${mode}`);
+      if (activeBtn) {
+        activeBtn.classList.add('bg-surface-700', 'text-cyan-400');
+        activeBtn.classList.remove('text-slate-400');
+      }
+      renderCanvas();
+    }
+
+    function renderCanvas() {
+      const container = document.getElementById('canvas-content-container');
+      if (!container) return;
+
+      if (currentViewMode === 'kanban') {
+        renderKanban(container);
+      } else if (currentViewMode === 'grid') {
+        renderGrid(container);
+      } else {
+        renderCalendar(container);
+      }
+      lucide.createIcons();
+    }
+
+    function renderKanban(container) {
+      // Default Kanban columns
+      const stages = ['lead', 'qualified', 'quoted', 'won', 'todo', 'in_progress', 'scheduled', 'posted'];
+      const activeStages = ['lead', 'qualified', 'quoted', 'won']; // primary focus
+
+      container.innerHTML = `
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+          ${activeStages.map(stage => {
+            const items = canvasItemsData.filter(i => (i.stage || '').toLowerCase() === stage);
+            return `
+              <div class="p-3 rounded-xl bg-surface-900 border border-white/5 space-y-3">
+                <div class="flex items-center justify-between text-xs font-mono uppercase text-slate-400 pb-2 border-b border-white/5">
+                  <span class="font-semibold text-white">${stage}</span>
+                  <span class="text-[10px] px-1.5 py-0.2 rounded bg-surface-800">${items.length}</span>
+                </div>
+                <div class="space-y-2 min-h-[300px]">
+                  ${items.map(item => `
+                    <div onclick="open360Drawer('${item.entity_id || item.supplier_entity_id || 'ent_apex'}')" class="p-3 rounded-lg bg-surface-850 hover:bg-surface-800 border border-white/5 hover:border-brand-500/30 transition cursor-pointer space-y-2">
+                      <div class="flex items-start justify-between">
+                        <span class="text-xs font-semibold text-white">${item.title || item.name || item.sku}</span>
+                        ${item.amount ? `<span class="text-xs font-mono text-emerald-400">$${item.amount.toLocaleString()}</span>` : ''}
+                      </div>
+                      <div class="flex items-center justify-between text-[10px] text-slate-400 font-mono">
+                        <span>${item.entity_name || item.assignee_name || 'Unassigned'}</span>
+                        <span class="text-slate-400">${item.category || item.type || 'item'}</span>
+                      </div>
+                    </div>
+                  `).join('')}
+                </div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+    }
+
+    function renderGrid(container) {
+      container.innerHTML = `
+        <div class="rounded-xl bg-surface-900 border border-white/5 overflow-x-auto">
+          <table class="w-full text-left text-xs">
+            <thead class="border-b border-white/10 text-slate-400 font-mono text-[10px] uppercase">
+              <tr>
+                <th class="py-3 px-4">Identifier / Title</th>
+                <th class="py-3 px-4">Category / Type</th>
+                <th class="py-3 px-4">Stage / Status</th>
+                <th class="py-3 px-4">Assigned / Entity</th>
+                <th class="py-3 px-4">Value / Qty</th>
+                <th class="py-3 px-4 text-right">360 View</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-white/5 font-mono">
+              ${canvasItemsData.map(item => `
+                <tr class="hover:bg-surface-850/50 transition">
+                  <td class="py-2.5 px-4 font-sans font-medium text-white">${item.title || item.name || item.sku}</td>
+                  <td class="py-2.5 px-4 text-slate-400">${item.category || item.type || 'record'}</td>
+                  <td class="py-2.5 px-4">
+                    <span class="px-2 py-0.5 rounded bg-surface-800 text-[10px] text-cyan-400">${item.stage || item.status || 'active'}</span>
+                  </td>
+                  <td class="py-2.5 px-4 text-slate-300">${item.entity_name || item.assignee_name || item.supplier_name || '—'}</td>
+                  <td class="py-2.5 px-4 text-emerald-400">
+                    ${item.amount !== undefined ? `$${item.amount.toLocaleString()}` : (item.stock_qty !== undefined ? `${item.stock_qty} in stock` : '—')}
+                  </td>
+                  <td class="py-2.5 px-4 text-right">
+                    <button onclick="open360Drawer('${item.entity_id || item.supplier_entity_id || 'ent_apex'}')" class="p-1 rounded hover:bg-surface-800 text-brand-400">
+                      <i data-lucide="eye" class="w-4 h-4"></i>
+                    </button>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    function renderCalendar(container) {
+      container.innerHTML = `
+        <div class="p-6 rounded-xl bg-surface-900 border border-white/5 space-y-4 text-center">
+          <i data-lucide="calendar" class="w-8 h-8 text-cyan-400 mx-auto"></i>
+          <h3 class="text-sm font-semibold text-white">Universal Timeline & Shift Schedule</h3>
+          <p class="text-xs text-slate-400 max-w-md mx-auto">
+            Employee shifts, project task delivery deadlines, and quarterly deal closes rendered on an active timeline.
+          </p>
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-left font-mono text-xs max-w-3xl mx-auto pt-4">
+            <div class="p-3 rounded-lg bg-surface-950 border border-white/5">
+              <span class="text-slate-400 text-[10px]">OCT 20, 2026</span>
+              <p class="text-white mt-1">L3 On-Call Shift (Alex Mercer)</p>
+            </div>
+            <div class="p-3 rounded-lg bg-surface-950 border border-white/5">
+              <span class="text-slate-400 text-[10px]">OCT 25, 2026</span>
+              <p class="text-cyan-400 mt-1">MCP SSE Transport Upgrade Due</p>
+            </div>
+            <div class="p-3 rounded-lg bg-surface-950 border border-white/5">
+              <span class="text-slate-400 text-[10px]">NOV 15, 2026</span>
+              <p class="text-emerald-400 mt-1">Apex Expansion Deal Target Close</p>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    // ------------------------------------------------------------------
+    // 360-Degree Entity Slide-Over Drawer
+    // ------------------------------------------------------------------
+    async function open360Drawer(entityId) {
+      const drawer = document.getElementById('slide-over-drawer');
+      if (!drawer) return;
+      drawer.classList.remove('translate-x-full');
+
+      try {
+        const res = await fetch(`/api/entities/${entityId}/360`);
+        const data = await res.json();
+        const ent = data.entity;
+
+        document.getElementById('drawer-entity-name').textContent = ent.name;
+        document.getElementById('drawer-entity-role').textContent = ent.role;
+        document.getElementById('drawer-email').textContent = ent.email || 'None';
+        document.getElementById('drawer-phone').textContent = ent.phone || 'None';
+        document.getElementById('drawer-status').textContent = ent.status;
+
+        // Populate pipeline records
+        const pipeContainer = document.getElementById('drawer-pipeline-records');
+        pipeContainer.innerHTML = data.pipeline_records.map(p => `
+          <div class="p-2.5 rounded-lg bg-surface-950 border border-white/5 flex items-center justify-between">
+            <div>
+              <span class="font-semibold text-white block">${p.title}</span>
+              <span class="text-[10px] text-slate-400 font-mono">${p.category} • Stage: ${p.stage}</span>
+            </div>
+            ${p.amount ? `<span class="font-mono text-emerald-400">$${p.amount.toLocaleString()}</span>` : ''}
+          </div>
+        `).join('') || '<div class="text-slate-400">No active pipeline records</div>';
+
+        // Populate ledger
+        const ledgerContainer = document.getElementById('drawer-financial-records');
+        ledgerContainer.innerHTML = data.financial_transactions.map(l => `
+          <div class="p-2 rounded bg-surface-950 border border-white/5 flex items-center justify-between">
+            <div>
+              <span class="${l.type === 'debit' ? 'text-cyan-400' : 'text-emerald-400'} font-semibold">${l.type.toUpperCase()}</span>
+              <span class="text-slate-300 ml-1">${l.account}</span>
+              <p class="text-[10px] text-slate-400 font-sans">${l.description}</p>
+            </div>
+            <span class="font-bold text-white">$${l.amount.toLocaleString()}</span>
+          </div>
+        `).join('') || '<div class="text-slate-400">No ledger transactions</div>';
+
+        lucide.createIcons();
+      } catch (err) {
+        console.error("Failed to load 360 profile:", err);
+      }
+    }
+
+    function closeDrawer() {
+      const drawer = document.getElementById('slide-over-drawer');
+      if (drawer) drawer.classList.add('translate-x-full');
+    }
+
+    // ------------------------------------------------------------------
+    // Workplace Productivity: Docs & Channels
+    // ------------------------------------------------------------------
+    async function loadChatMessages() {
+      try {
+        const res = await fetch(`/api/content?type=chat_message&channel=${encodeURIComponent(activeChannel)}`);
+        const messages = await res.json();
+        const stream = document.getElementById('chat-messages-stream');
+        if (!stream) return;
+
+        stream.innerHTML = messages.map(m => `
+          <div class="flex items-start gap-3 text-xs">
+            <div class="h-6 w-6 rounded-full bg-brand-500/20 text-brand-400 flex items-center justify-center font-bold text-[10px]">
+              ${(m.author_name || 'OP').substring(0, 2).toUpperCase()}
+            </div>
+            <div>
+              <div class="flex items-center gap-2">
+                <span class="font-semibold text-white">${m.author_name || 'Operator'}</span>
+                <span class="text-[10px] text-slate-400 font-mono">${new Date(m.created_at).toLocaleTimeString()}</span>
+              </div>
+              <p class="text-slate-300 mt-0.5">${m.markdown_body}</p>
+            </div>
+          </div>
+        `).join('');
+
+        stream.scrollTop = stream.scrollHeight;
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function sendChatMessage(e) {
+      e.preventDefault();
+      const input = document.getElementById('chat-input');
+      const text = input.value.trim();
+      if (!text) return;
+
+      await fetch('/api/content', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          block_type: 'chat_message',
+          channel_or_source: activeChannel,
+          markdown_body: text,
+        })
+      });
+
+      input.value = '';
+      loadChatMessages();
+    }
+
+    function selectChannel(channel) {
+      activeChannel = channel;
+      document.getElementById('current-channel-title').textContent = channel.replace('#', '');
+      document.getElementById('chat-mode-container').classList.remove('hidden');
+      document.getElementById('doc-mode-container').classList.add('hidden');
+      loadChatMessages();
+    }
+
+    async function loadWikiDoc(docId) {
+      document.getElementById('chat-mode-container').classList.add('hidden');
+      document.getElementById('doc-mode-container').classList.remove('hidden');
+
+      const res = await fetch('/api/content');
+      const blocks = await res.json();
+      const doc = blocks.find(b => b.id === docId);
+      if (doc) {
+        document.getElementById('doc-title-display').textContent = doc.title || 'Document';
+        document.getElementById('doc-markdown-body').innerHTML = marked.parse(doc.markdown_body);
+      }
+    }
+
+    function generateVideoMeeting() {
+      const room = "bos-meeting-" + Math.floor(100 + Math.random() * 900);
+      const url = `https://meet.jit.si/${room}`;
+      const card = document.getElementById('video-link-card');
+      const link = document.getElementById('video-room-url');
+      if (card && link) {
+        link.href = url;
+        link.textContent = url;
+        card.classList.remove('hidden');
+      }
+    }
+
+    function copyVideoLink() {
+      const link = document.getElementById('video-room-url').href;
+      navigator.clipboard.writeText(link);
+      notifyToast("Instant video meeting link copied to clipboard!");
+    }
+
+    // ------------------------------------------------------------------
+    // Business Pulse Dashboard
+    // ------------------------------------------------------------------
+    async function loadBusinessPulse() {
+      try {
+        const res = await fetch('/api/pulse');
+        const pulse = await res.json();
+
+        // Update KPI Cards
+        document.getElementById('kpi-net-pnl').textContent = `$${pulse.net_pnl.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+        document.getElementById('kpi-cash-balance').textContent = `$${pulse.cash_balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+        document.getElementById('kpi-inventory-health').textContent = `${pulse.low_stock_count} Low Stock`;
+        document.getElementById('kpi-urgent-reviews-count').textContent = `${pulse.urgent_reviews_count} Action Staged`;
+
+        // Update Ledger card
+        document.getElementById('ledger-revenue').textContent = `$${pulse.revenue.toLocaleString()}`;
+        document.getElementById('ledger-expenses').textContent = `($${pulse.expenses.toLocaleString()})`;
+        document.getElementById('ledger-net-cash').textContent = `$${pulse.cash_balance.toLocaleString()}`;
+
+        // Reviews Feed
+        const feed = document.getElementById('pulse-reviews-feed');
+        if (feed && pulse.urgent_reviews) {
+          feed.innerHTML = pulse.urgent_reviews.map(r => `
+            <div class="p-3 rounded-lg bg-surface-950 border border-white/5 space-y-1">
+              <div class="flex items-center justify-between text-[11px]">
+                <span class="text-rose-400 font-mono font-semibold">${r.source.toUpperCase()}</span>
+                <span class="text-rose-400 font-mono">Sentiment: ${r.sentiment}</span>
+              </div>
+              <p class="text-xs text-white">${r.title}</p>
+            </div>
+          `).join('') || '<div class="text-slate-400 text-xs">No negative reviews flagged.</div>';
+        }
+      } catch (err) {
+        console.error("Failed to load pulse:", err);
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // MCP & Agent Hub: Policies & Audit Logs
+    // ------------------------------------------------------------------
+    async function loadHitlPolicies() {
+      try {
+        const res = await fetch('/api/tokens');
+        const data = await res.json();
+        const grid = document.getElementById('hitl-policies-grid');
+        if (!grid) return;
+
+        grid.innerHTML = data.policies.map(p => `
+          <div class="p-3 rounded-lg bg-surface-950 border border-white/5 flex items-center justify-between">
+            <div>
+              <span class="text-xs font-mono text-white block">${p.tool_name}</span>
+              <span class="text-[10px] text-slate-400 font-mono">Risk: ${p.risk_level}</span>
+            </div>
+            <label class="relative inline-flex items-center cursor-pointer">
+              <input type="checkbox" onchange="toggleHitlPolicy('${p.tool_name}', this.checked)" ${p.requires_hitl ? 'checked' : ''} class="sr-only peer">
+              <div class="w-8 h-4 bg-surface-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-600"></div>
+            </label>
+          </div>
+        `).join('');
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function toggleHitlPolicy(toolName, enabled) {
+      await fetch(`/api/hitl-policies/${toolName}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requires_hitl: enabled })
+      });
+      notifyToast(`HITL policy for ${toolName} updated: ${enabled ? 'Enforced' : 'Auto-Execute'}`);
+    }
+
+    async function loadAuditLogs() {
+      try {
+        const res = await fetch('/api/audit-logs');
+        const logs = await res.json();
+        const tbody = document.getElementById('audit-logs-tbody');
+        if (!tbody) return;
+
+        tbody.innerHTML = logs.map(l => `
+          <tr class="hover:bg-surface-850/50 transition ${l.is_reverted ? 'opacity-40 line-through' : ''}">
+            <td class="py-2 px-3 text-slate-400">${l.id}</td>
+            <td class="py-2 px-3 text-cyan-400">${l.actor_id}</td>
+            <td class="py-2 px-3 text-white font-medium">${l.tool_name}</td>
+            <td class="py-2 px-3 text-slate-300">${l.table_name}</td>
+            <td class="py-2 px-3">
+              <span class="px-1.5 py-0.2 rounded text-[10px] ${l.action === 'INSERT' ? 'text-emerald-400 bg-emerald-500/10' : l.action === 'UPDATE' ? 'text-cyan-400 bg-cyan-500/10' : 'text-purple-400 bg-purple-500/10'}">${l.action}</span>
+            </td>
+            <td class="py-2 px-3 text-slate-400">${new Date(l.created_at).toLocaleTimeString()}</td>
+            <td class="py-2 px-3 text-right">
+              ${!l.is_reverted && l.action !== 'ROLLBACK' ? `
+                <button onclick="rollbackAudit('${l.id}')" class="px-2 py-0.5 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-[10px] transition">
+                  Undo Action
+                </button>
+              ` : '<span class="text-slate-400 text-[10px]">Reverted</span>'}
+            </td>
+          </tr>
+        `).join('');
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function rollbackAudit(auditId) {
+      if (!confirm(`Trigger 1-click rollback for state modification ${auditId}?`)) return;
+      try {
+        const res = await fetch(`/api/audit-logs/${auditId}/rollback`, { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          notifyToast(data.message);
+          loadAuditLogs();
+          loadCanvasItems();
+          loadBusinessPulse();
+        } else {
+          alert(data.error);
+        }
+      } catch (err) {
+        alert("Rollback failed: " + err.message);
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // Omni-Bar Cmd+K Search
+    // ------------------------------------------------------------------
+    function openOmniBar() {
+      const dialog = document.getElementById('omni-bar-dialog');
+      if (dialog) {
+        dialog.showModal();
+        document.getElementById('omni-search-input').focus();
+      }
+    }
+
+    function closeOmniBar() {
+      const dialog = document.getElementById('omni-bar-dialog');
+      if (dialog) dialog.close();
+    }
+
+    function handleOmniSearch(query) {
+      const q = query.toLowerCase();
+      // Simple filter demonstration
+      const items = document.querySelectorAll('#omni-results-container button');
+      items.forEach(btn => {
+        if (btn.textContent.toLowerCase().includes(q)) {
+          btn.style.display = 'flex';
+        } else {
+          btn.style.display = 'none';
+        }
+      });
+    }
+
+    function quickAction(actionType) {
+      if (actionType === 'check_stock') {
+        switchView('canvas', 'inventory');
+        notifyToast("Inventory stock scan active.");
+      } else if (actionType === 'draft_po') {
+        fetch('/api/staged-actions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sku: 'HW-SRV-01',
+            quantity: 10
+          })
+        });
+        switchView('inbox');
+        notifyToast("Restock PO staged for operator sign-off.");
+      }
+    }
+
+    function triggerQuickSync() {
+      notifyToast("NAP directories and inventory sync webhook dispatched.");
+      loadBusinessPulse();
+    }
+
+    function copySnippet(id) {
+      const text = document.getElementById(id).textContent;
+      navigator.clipboard.writeText(text);
+      notifyToast("Configuration snippet copied to clipboard.");
+    }
+
+    // Toast notifications
+    function notifyToast(msg) {
+      const toast = document.createElement('div');
+      toast.className = 'fixed bottom-5 right-5 px-4 py-2.5 rounded-lg bg-surface-800 border border-white/10 text-white text-xs font-mono shadow-2xl z-50 animate-bounce';
+      toast.textContent = msg;
+      document.body.appendChild(toast);
+      setTimeout(() => toast.remove(), 3500);
+    }
+  </script>
+</body>
+</html>

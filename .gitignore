@@ -1,0 +1,19 @@
+# Database files
+*.db
+*.db-wal
+*.db-shm
+data/
+
+# Temporary / Scratch files
+test.txt
+scratch/
+
+# Dependencies
+node_modules/
+.bun/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
