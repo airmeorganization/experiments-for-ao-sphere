@@ -26,7 +26,7 @@ import { randomBytes, createHash, createHmac, timingSafeEqual, randomUUID } from
 // --------------------------------------------------------------------
 // Database Initialization & WAL Mode Configuration
 // --------------------------------------------------------------------
-const DB_PATH = process.env.DATABASE_PATH || join(process.cwd(), "bos.db");
+const DB_PATH = process.env.DATABASE_PATH || (process.env.NODE_ENV === "test" ? join(process.cwd(), "test_bos.db") : join(process.cwd(), "bos.db"));
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const SCHEMA_FILE = join(process.cwd(), "schema.sql");
 const ALLOW_UNAUTHENTICATED_LOCAL = process.env.ALLOW_UNAUTHENTICATED_LOCAL === "true";
@@ -206,7 +206,9 @@ export interface StagedAction {
   proposed_payload_json: string;
   risk_level: "low" | "medium" | "high" | "critical";
   reasoning: string;
-  status: "pending" | "in_progress" | "approved" | "rejected" | "edited";
+  status: "pending" | "in_progress" | "approved" | "rejected" | "edited" | "pending_human_approval";
+  staged?: boolean;
+  staged_action_id?: string;
   reviewed_by?: string;
   reviewed_at?: string;
   execution_result_json?: string;
@@ -243,7 +245,14 @@ export interface AgentTokenRow {
 // Durable SQLite-Backed Sliding-Window Rate Limiter
 // --------------------------------------------------------------------
 export class RateLimiter {
-  static check(key: string, limitPerMinute: number = 120, targetDb: Database = db): { allowed: boolean; remaining: number; retryAfterSec: number } {
+  private static inMemoryFallback = new Map<string, number[]>();
+
+  static check(
+    key: string,
+    limitPerMinute: number = 120,
+    targetDb: Database = db,
+    failClosed: boolean = true
+  ): { allowed: boolean; remaining: number; retryAfterSec: number; error?: string } {
     const now = Date.now();
     const windowStart = now - 60_000;
 
@@ -279,13 +288,33 @@ export class RateLimiter {
       });
 
       return tx();
-    } catch {
-      // Graceful fallback to allowed if table is being initialized
-      return { allowed: true, remaining: 1, retryAfterSec: 0 };
+    } catch (dbErr: any) {
+      console.error(`[SECURITY ALERT] RateLimiter SQLite failure on key '${key}': ${dbErr?.message || dbErr}. Engaging fallback limiter.`);
+
+      // Enforce throttling via in-memory sliding-window fallback so requests NEVER bypass rate limiting
+      try {
+        let timestamps = this.inMemoryFallback.get(key) || [];
+        timestamps = timestamps.filter(t => t > windowStart);
+
+        if (timestamps.length >= limitPerMinute) {
+          this.inMemoryFallback.set(key, timestamps);
+          const oldest = timestamps[0] || now;
+          const retryAfterSec = Math.max(1, Math.ceil((oldest + 60_000 - now) / 1000));
+          return { allowed: false, remaining: 0, retryAfterSec, error: "Database rate limit error; throttled by fallback." };
+        }
+
+        timestamps.push(now);
+        this.inMemoryFallback.set(key, timestamps);
+        return { allowed: true, remaining: limitPerMinute - timestamps.length, retryAfterSec: 0 };
+      } catch {
+        // If even the in-memory fallback encounters an error, fail closed
+        return { allowed: false, remaining: 0, retryAfterSec: 10, error: "Rate limiting failure: failed closed for safety." };
+      }
     }
   }
 
   static reset(targetDb: Database = db) {
+    this.inMemoryFallback.clear();
     try {
       targetDb.exec("DELETE FROM rate_limits;");
     } catch {
@@ -450,6 +479,25 @@ export class SecurityManager {
     const tokenHash = this.hashToken(rawToken);
     const tokenPrefix = `${rawToken.substring(0, 12)}...${rawToken.substring(rawToken.length - 4)}`;
     return { rawToken, tokenHash, tokenPrefix };
+  }
+
+  static createAgentToken(name: string, scopes: string[] = ["*"], rateLimit: number = 120, targetDb: Database = db): string {
+    const { rawToken, tokenHash, tokenPrefix } = this.generateSecureToken("bos_agent_");
+    const tokenId = "tok_" + randomUUID().substring(0, 8);
+
+    targetDb.query(`
+      INSERT INTO agent_tokens (id, name, token_hash, token_prefix, scopes, rate_limit_per_min, is_active)
+      VALUES ($id, $name, $hash, $prefix, $scopes, $limit, 1)
+    `).run({
+      $id: tokenId,
+      $name: name,
+      $hash: tokenHash,
+      $prefix: tokenPrefix,
+      $scopes: JSON.stringify(scopes),
+      $limit: rateLimit,
+    });
+
+    return rawToken;
   }
 
   static bootstrapAdminKey() {
@@ -690,7 +738,13 @@ export class HitlEngine {
       $reasoning: reasoning,
     });
 
-    return db.query<StagedAction, { $id: string }>("SELECT * FROM staged_actions WHERE id = $id").get({ $id: stagedId })!;
+    const row = db.query<StagedAction, { $id: string }>("SELECT * FROM staged_actions WHERE id = $id").get({ $id: stagedId })!;
+    return {
+      ...row,
+      staged: true,
+      staged_action_id: stagedId,
+      status: "pending_human_approval",
+    };
   }
 
   // Atomic state claiming eliminates TOCTOU race conditions
@@ -701,7 +755,7 @@ export class HitlEngine {
       // 1. Atomically claim the pending action
       const claimResult = db.query(`
         UPDATE staged_actions
-        SET status = 'in_progress', reviewed_by = $reviewer
+        SET status = 'approved', reviewed_by = $reviewer, reviewed_at = CURRENT_TIMESTAMP
         WHERE id = $id AND status = 'pending'
       `).run({ $reviewer: reviewerId, $id: stagedId });
 
@@ -716,12 +770,10 @@ export class HitlEngine {
       // 2. Execute underlying high-stakes tool
       executionResult = BusinessCoreService.executeToolInternal(action.tool_name, { ...params, ...proposed }, reviewerId, true);
 
-      // 3. Finalize status to 'approved'
+      // 3. Finalize execution result
       db.query(`
         UPDATE staged_actions
-        SET status = 'approved',
-            reviewed_at = CURRENT_TIMESTAMP,
-            execution_result_json = $result
+        SET execution_result_json = $result
         WHERE id = $id
       `).run({
         $result: JSON.stringify(executionResult),
@@ -760,7 +812,7 @@ export class HitlEngine {
     const tx = db.transaction(() => {
       const claimResult = db.query(`
         UPDATE staged_actions
-        SET status = 'in_progress', reviewed_by = $reviewer
+        SET status = 'edited', reviewed_by = $reviewer, reviewed_at = CURRENT_TIMESTAMP
         WHERE id = $id AND status = 'pending'
       `).run({ $reviewer: reviewerId, $id: stagedId });
 
@@ -773,9 +825,7 @@ export class HitlEngine {
 
       db.query(`
         UPDATE staged_actions
-        SET status = 'edited',
-            proposed_payload_json = $payload,
-            reviewed_at = CURRENT_TIMESTAMP,
+        SET proposed_payload_json = $payload,
             execution_result_json = $result
         WHERE id = $id
       `).run({
@@ -1741,7 +1791,27 @@ export function startMcpStdioServer() {
 // --------------------------------------------------------------------
 // HTTP Server with Rate Limiting, Signed Webhooks, and Protected REST API
 // --------------------------------------------------------------------
-const sseClients = new Map<string, (data: string) => void>();
+export interface SseSession {
+  id: string;
+  agentId: string;
+  scopes: string[];
+  send: (data: string) => void;
+  createdAt: number;
+  lastActiveAt: number;
+}
+export const sseSessions = new Map<string, SseSession>();
+
+export function sanitizeUrlForLogging(rawUrl: string): string {
+  try {
+    const u = new URL(rawUrl);
+    if (u.searchParams.has("token")) {
+      u.searchParams.set("token", "[REDACTED]");
+    }
+    return u.toString();
+  } catch {
+    return rawUrl.replace(/([?&]token=)[^&]+/g, "$1[REDACTED]");
+  }
+}
 
 function jsonResponse(data: any, status: number = 200, extraHeaders: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(data), {
@@ -1793,7 +1863,13 @@ export async function handleHttpRequest(req: Request, server?: any): Promise<Res
   // MCP Streamable HTTP / Server-Sent Events (SSE) Protocol
   // --------------------------------------------------------------
   if (path === "/mcp/sse" && method === "GET") {
-    const auth = SecurityManager.verifyToken(req.headers.get("Authorization") || url.searchParams.get("token"));
+    const queryToken = url.searchParams.get("token");
+    if (queryToken) {
+      console.warn(`[SECURITY WARNING] /mcp/sse invoked with token in query string parameter (${sanitizeUrlForLogging(req.url)}). Prefer 'Authorization: Bearer <token>' header to avoid logging secrets in proxies.`);
+    }
+
+    const token = req.headers.get("Authorization") || queryToken;
+    const auth = SecurityManager.verifyToken(token);
     if (!auth.authenticated) {
       return jsonResponse({ error: auth.error }, 401);
     }
@@ -1804,9 +1880,21 @@ export async function handleHttpRequest(req: Request, server?: any): Promise<Res
     const stream = new ReadableStream({
       start(controller) {
         sendEvent = (data: string) => {
-          controller.enqueue(new TextEncoder().encode(`event: message\ndata: ${data}\n\n`));
+          try {
+            controller.enqueue(new TextEncoder().encode(`event: message\ndata: ${data}\n\n`));
+          } catch {
+            sseSessions.delete(sessionId);
+          }
         };
-        sseClients.set(sessionId, sendEvent);
+
+        sseSessions.set(sessionId, {
+          id: sessionId,
+          agentId: auth.agentId,
+          scopes: auth.scopes,
+          send: sendEvent,
+          createdAt: Date.now(),
+          lastActiveAt: Date.now(),
+        });
 
         controller.enqueue(
           new TextEncoder().encode(
@@ -1815,9 +1903,15 @@ export async function handleHttpRequest(req: Request, server?: any): Promise<Res
         );
       },
       cancel() {
-        sseClients.delete(sessionId);
+        sseSessions.delete(sessionId);
       },
     });
+
+    if (req.signal) {
+      req.signal.addEventListener("abort", () => {
+        sseSessions.delete(sessionId);
+      });
+    }
 
     return new Response(stream, {
       headers: {
@@ -1837,6 +1931,18 @@ export async function handleHttpRequest(req: Request, server?: any): Promise<Res
       return jsonResponse({ error: auth.error }, 401);
     }
 
+    // Verify Session Ownership: Reject Cross-Session Hijacking (High Priority)
+    if (sessionId) {
+      const session = sseSessions.get(sessionId);
+      if (!session) {
+        return jsonResponse({ error: `SSE Session '${sessionId}' not found or has been closed.` }, 404);
+      }
+      if (session.agentId !== auth.agentId) {
+        return jsonResponse({ error: `Forbidden: SSE Session '${sessionId}' does not belong to the authenticated identity '${auth.agentId}'.` }, 403);
+      }
+      session.lastActiveAt = Date.now();
+    }
+
     if (auth.rateLimit) {
       const rl = RateLimiter.check(auth.agentId, auth.rateLimit);
       if (!rl.allowed) {
@@ -1853,8 +1959,8 @@ export async function handleHttpRequest(req: Request, server?: any): Promise<Res
 
     const response = handleMcpJsonRpc(body, auth.agentId, auth.scopes);
 
-    if (sessionId && sseClients.has(sessionId)) {
-      sseClients.get(sessionId)!(JSON.stringify(response));
+    if (sessionId && sseSessions.has(sessionId)) {
+      sseSessions.get(sessionId)!.send(JSON.stringify(response));
     }
 
     return jsonResponse(response);
@@ -1933,8 +2039,11 @@ export async function handleHttpRequest(req: Request, server?: any): Promise<Res
         };
       }
 
-      // 2. Inventory Availability Validation (Prevent Silent Overselling)
-      if (order.items && Array.isArray(order.items)) {
+      // 2. Inventory Availability Validation & Order Total Reconciliation
+      let catalogSubtotal = 0;
+      const reconciliationItems: Array<{ sku: string; name: string; quantity: number; unit_price: number; subtotal: number }> = [];
+
+      if (order.items && Array.isArray(order.items) && order.items.length > 0) {
         for (const item of order.items) {
           if (!item.sku || !Number.isFinite(item.quantity) || item.quantity <= 0) {
             return {
@@ -1967,6 +2076,38 @@ export async function handleHttpRequest(req: Request, server?: any): Promise<Res
               requested_quantity: item.quantity,
             };
           }
+
+          const lineSubtotal = Math.round(item.quantity * catItem.unit_price * 100) / 100;
+          catalogSubtotal += lineSubtotal;
+          reconciliationItems.push({
+            sku: catItem.sku,
+            name: catItem.name,
+            quantity: item.quantity,
+            unit_price: catItem.unit_price,
+            subtotal: lineSubtotal,
+          });
+        }
+
+        // Reconcile total_amount with catalog prices, taxes, shipping, discounts
+        const taxAmount = Number.isFinite(order.tax_amount) && order.tax_amount > 0 ? Math.round(order.tax_amount * 100) / 100 : 0;
+        const shippingAmount = Number.isFinite(order.shipping_amount) && order.shipping_amount > 0 ? Math.round(order.shipping_amount * 100) / 100 : 0;
+        const discountAmount = Number.isFinite(order.discount_amount) && order.discount_amount > 0 ? Math.round(order.discount_amount * 100) / 100 : 0;
+
+        const expectedTotal = Math.round((catalogSubtotal + taxAmount + shippingAmount - discountAmount) * 100) / 100;
+        const receivedTotal = Math.round(order.total_amount * 100) / 100;
+
+        if (Math.abs(expectedTotal - receivedTotal) > 0.01) {
+          return {
+            error: `Order total reconciliation mismatch: received total $${receivedTotal.toFixed(2)}, but expected $${expectedTotal.toFixed(2)} based on catalog unit prices ($${catalogSubtotal.toFixed(2)} items + $${taxAmount.toFixed(2)} tax + $${shippingAmount.toFixed(2)} shipping - $${discountAmount.toFixed(2)} discount).`,
+            status: 422,
+            code: "ORDER_TOTAL_MISMATCH",
+            received_total: receivedTotal,
+            expected_total: expectedTotal,
+            catalog_subtotal: catalogSubtotal,
+            tax_amount: taxAmount,
+            shipping_amount: shippingAmount,
+            discount_amount: discountAmount,
+          };
         }
       }
 
@@ -2011,7 +2152,17 @@ export async function handleHttpRequest(req: Request, server?: any): Promise<Res
         customerId = customer.id;
       }
 
-      // 5. Insert Sales Order State Machine Record
+      // 5. Insert Sales Order State Machine Record with Reconciliation Metadata
+      const enrichedOrderPayload = {
+        ...order,
+        reconciliation: {
+          catalog_subtotal: catalogSubtotal,
+          reconciled_total: order.total_amount,
+          items: reconciliationItems,
+          reconciled_at: new Date().toISOString(),
+        },
+      };
+
       db.query(`
         INSERT INTO pipeline_states (id, category, title, stage, entity_id, amount, payload_json)
         VALUES ($id, 'sales_order', $title, 'paid', $entity_id, $amount, $payload)
@@ -2020,12 +2171,23 @@ export async function handleHttpRequest(req: Request, server?: any): Promise<Res
         $title: `E-commerce Order #${externalOrderNum}`,
         $entity_id: customerId,
         $amount: order.total_amount || 0,
-        $payload: JSON.stringify(order),
+        $payload: JSON.stringify(enrichedOrderPayload),
       });
 
-      // 6. Strict Double-Entry Ledger Posting
+      // 6. Strict Double-Entry Ledger Posting with itemized breakdown
       const txGroup = "tx_grp_ecom_" + randomUUID().substring(0, 8);
-      LedgerManager.postTransaction(txGroup, [
+      const taxAmount = Number.isFinite(order.tax_amount) && order.tax_amount > 0 ? Math.round(order.tax_amount * 100) / 100 : 0;
+      const ledgerJournal: Array<{
+        type: "debit" | "credit";
+        account: string;
+        category: string;
+        amount: number;
+        tax_amount?: number;
+        currency?: string;
+        reference_id?: string;
+        entity_id?: string;
+        description: string;
+      }> = [
         {
           type: "debit",
           account: "cash",
@@ -2033,21 +2195,47 @@ export async function handleHttpRequest(req: Request, server?: any): Promise<Res
           amount: order.total_amount,
           reference_id: orderPipelineId,
           entity_id: customerId,
-          description: `E-commerce settlement for order #${externalOrderNum}`
+          description: `E-commerce settlement for order #${externalOrderNum}`,
         },
-        {
+      ];
+
+      if (taxAmount > 0) {
+        ledgerJournal.push(
+          {
+            type: "credit",
+            account: "revenue",
+            category: "ecommerce",
+            amount: Math.round((order.total_amount - taxAmount) * 100) / 100,
+            reference_id: orderPipelineId,
+            entity_id: customerId,
+            description: `E-commerce net revenue recognition`,
+          },
+          {
+            type: "credit",
+            account: "tax_payable",
+            category: "ecommerce",
+            amount: taxAmount,
+            reference_id: orderPipelineId,
+            entity_id: customerId,
+            description: `E-commerce sales tax collected payable`,
+          }
+        );
+      } else {
+        ledgerJournal.push({
           type: "credit",
           account: "revenue",
           category: "ecommerce",
           amount: order.total_amount,
           reference_id: orderPipelineId,
           entity_id: customerId,
-          description: `E-commerce revenue recognition`
-        }
-      ], db);
+          description: `E-commerce revenue recognition`,
+        });
+      }
+
+      LedgerManager.postTransaction(txGroup, ledgerJournal, db);
 
       // 7. Audit Logging
-      AuditEngine.record("system", "ecom_webhook", "webhook_order_ingest", "pipeline_states", orderPipelineId, "INSERT", null, order);
+      AuditEngine.record("system", "ecom_webhook", "webhook_order_ingest", "pipeline_states", orderPipelineId, "INSERT", null, enrichedOrderPayload);
 
       return { success: true, order_id: orderPipelineId, transaction_group_id: txGroup };
     });

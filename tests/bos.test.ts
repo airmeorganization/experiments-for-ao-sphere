@@ -426,7 +426,7 @@ describe("8. Order Webhook Trust Boundary (HMAC Signatures, Forgery Rejection & 
       order_number: orderNumber,
       customer_name: "Verified Customer",
       customer_email: "verified@customer.com",
-      total_amount: 750.0,
+      total_amount: 1850.0,
       items: [{ sku: "HW-SRV-01", quantity: 1 }],
     });
 
@@ -591,8 +591,8 @@ describe("11. Webhook Concurrency & Idempotency Invariants", () => {
       customer_name: "Concurrency Tester",
       customer_email: "concurrency@test.io",
       order_number: orderNumber,
-      total_amount: 500,
-      items: [{ sku: "cat_bos_cloud", quantity: 1 }],
+      total_amount: 240.0,
+      items: [{ sku: "HW-IOT-99", quantity: 1 }],
     });
 
     const sig = createHmac("sha256", TEST_WEBHOOK_SECRET).update(orderPayload).digest("hex");
@@ -740,6 +740,219 @@ describe("13. Durable SQLite-Backed Rate Limiting & Socket Protection", () => {
       "SELECT count(*) as count FROM rate_limits WHERE client_key = $key"
     ).get({ $key: testKey });
     expect(rows?.count).toBe(2);
+  });
+});
+
+describe("14. Rate-Limiter Database Failure & Fail-Closed Invariants", () => {
+  it("should engage in-memory fallback and enforce throttling when database encounters an error", () => {
+    // Create an isolated in-memory DB without the rate_limits table to simulate a database failure
+    const brokenDb = new Database(":memory:");
+    const testKey = "client_db_fail_" + randomUUID().substring(0, 6);
+
+    // Call 1 & 2 should succeed via fallback limiter
+    const check1 = RateLimiter.check(testKey, 2, brokenDb);
+    expect(check1.allowed).toBe(true);
+
+    const check2 = RateLimiter.check(testKey, 2, brokenDb);
+    expect(check2.allowed).toBe(true);
+
+    // Call 3 must be throttled (allowed: false) by the fallback limiter, preventing unthrottled bypass
+    const check3 = RateLimiter.check(testKey, 2, brokenDb);
+    expect(check3.allowed).toBe(false);
+    expect(check3.retryAfterSec).toBeGreaterThan(0);
+    expect(check3.error).toContain("throttled by fallback");
+
+    brokenDb.close();
+  });
+});
+
+describe("15. MCP SSE Session Ownership & Cross-Session Message Rejection", () => {
+  it("should bind SSE sessions to the owner agent and reject messages from unauthorized agents with 403 Forbidden", async () => {
+    // 1. Create two distinct agent tokens: Agent Alpha and Agent Beta
+    const tokenAlpha = SecurityManager.createAgentToken("Agent Alpha", ["*"], 120);
+    const tokenBeta = SecurityManager.createAgentToken("Agent Beta", ["*"], 120);
+
+    // 2. Agent Alpha initiates an SSE connection
+    const sseReq = new Request("http://localhost:8080/mcp/sse", {
+      method: "GET",
+      headers: { Authorization: `Bearer ${tokenAlpha}` },
+    });
+    const sseRes = await handleHttpRequest(sseReq);
+    expect(sseRes.status).toBe(200);
+
+    // Extract sessionId from endpoint event in SSE stream
+    const reader = sseRes.body?.getReader();
+    const chunk = await reader?.read();
+    const text = new TextDecoder().decode(chunk?.value);
+    const match = text.match(/sessionId=(sess_[a-zA-Z0-9_-]+)/);
+    expect(match).not.toBeNull();
+    const sessionId = match![1];
+
+    // 3. Agent Beta attempts to send a message targeting Agent Alpha's SSE session
+    const hijackedReq = new Request(`http://localhost:8080/mcp/messages?sessionId=${sessionId}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${tokenBeta}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "crm_search_entities", arguments: { query: "Apex" } },
+      }),
+    });
+
+    const hijackedRes = await handleHttpRequest(hijackedReq);
+    expect(hijackedRes.status).toBe(403);
+    const hijackedJson = await hijackedRes.json();
+    expect(hijackedJson.error).toContain("does not belong to the authenticated identity");
+
+    // 4. Agent Alpha (the legitimate owner) sends a message to the same session
+    const legitimateReq = new Request(`http://localhost:8080/mcp/messages?sessionId=${sessionId}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${tokenAlpha}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "crm_search_entities", arguments: { query: "Apex" } },
+      }),
+    });
+
+    const legitimateRes = await handleHttpRequest(legitimateReq);
+    expect(legitimateRes.status).toBe(200);
+
+    // Cancel reader to trigger cleanup
+    await reader?.cancel();
+  });
+});
+
+describe("16. Order Total & Line Item Price Reconciliation", () => {
+  it("should reject orders with total_amount mismatching catalog prices with 422 Unprocessable Entity", async () => {
+    // 1 unit of HW-IOT-99 is $240.00 in catalog. Buyer sends $10.00.
+    const orderNumber = "MISMATCH-" + randomUUID().substring(0, 6);
+    const orderPayload = JSON.stringify({
+      customer_name: "Tamper Tester",
+      customer_email: "tamper@test.io",
+      order_number: orderNumber,
+      total_amount: 10.00, // Inconsistent with catalog unit price ($240.00)
+      items: [{ sku: "HW-IOT-99", quantity: 1 }],
+    });
+
+    const sig = createHmac("sha256", TEST_WEBHOOK_SECRET).update(orderPayload).digest("hex");
+    const req = new Request("http://localhost:8080/api/webhooks/order", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Signature": sig },
+      body: orderPayload,
+    });
+
+    const res = await handleHttpRequest(req);
+    expect(res.status).toBe(422);
+
+    const json = await res.json();
+    expect(json.code).toBe("ORDER_TOTAL_MISMATCH");
+    expect(json.received_total).toBe(10.00);
+    expect(json.expected_total).toBe(240.00);
+
+    // Order must NOT be saved in pipeline_states
+    const orderRow = db.query<any, { $id: string }>(
+      "SELECT * FROM pipeline_states WHERE id = $id"
+    ).get({ $id: "pip_ord_" + orderNumber });
+    expect(orderRow).toBeNull();
+  });
+
+  it("should accept orders with matching reconciled catalog totals and taxes", async () => {
+    // 1 unit of HW-IOT-99 ($240.00) + $19.20 tax = $259.20
+    const orderNumber = "TAXED-" + randomUUID().substring(0, 6);
+    const orderPayload = JSON.stringify({
+      customer_name: "Taxed Buyer",
+      customer_email: "taxed@test.io",
+      order_number: orderNumber,
+      total_amount: 259.20,
+      tax_amount: 19.20,
+      items: [{ sku: "HW-IOT-99", quantity: 1 }],
+    });
+
+    const sig = createHmac("sha256", TEST_WEBHOOK_SECRET).update(orderPayload).digest("hex");
+    const req = new Request("http://localhost:8080/api/webhooks/order", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Signature": sig },
+      body: orderPayload,
+    });
+
+    const res = await handleHttpRequest(req);
+    expect(res.status).toBe(201);
+    const json = await res.json();
+    expect(json.success).toBe(true);
+
+    // Verify double-entry ledger entries (debit cash $259.20, credit revenue $240.00, credit tax_payable $19.20)
+    verifyTransactionGroupBalance(json.transaction_group_id, db);
+
+    const taxEntry = db.query<any, { $tx: string }>(
+      "SELECT amount FROM ledger_entries WHERE transaction_group_id = $tx AND account = 'tax_payable'"
+    ).get({ $tx: json.transaction_group_id });
+    expect(taxEntry?.amount).toBe(19.20);
+  });
+});
+
+describe("17. Concurrent Orders Competing for Same Remaining Stock", () => {
+  it("should allow only one order to claim the last remaining unit and reject the competing order without overselling", async () => {
+    // Create a special scarce item with stock_qty = 1
+    const scarceSku = "SCARCE-" + randomUUID().substring(0, 4);
+    db.query(`
+      INSERT INTO catalog_items (id, sku, name, type, stock_qty, unit_price, cost_price, currency)
+      VALUES ($id, $sku, 'Scarce Quantum Chip', 'physical', 1, 500.00, 200.00, 'USD')
+    `).run({
+      $id: "cat_" + scarceSku,
+      $sku: scarceSku,
+    });
+
+    const makeOrderReq = (buyerName: string, orderNum: string) => {
+      const payload = JSON.stringify({
+        customer_name: buyerName,
+        customer_email: `${buyerName.toLowerCase()}@test.io`,
+        order_number: orderNum,
+        total_amount: 500.00,
+        items: [{ sku: scarceSku, quantity: 1 }],
+      });
+      const sig = createHmac("sha256", TEST_WEBHOOK_SECRET).update(payload).digest("hex");
+      return new Request("http://localhost:8080/api/webhooks/order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Signature": sig },
+        body: payload,
+      });
+    };
+
+    const reqA = makeOrderReq("BuyerAlpha", "RACE-A-" + randomUUID().substring(0, 4));
+    const reqB = makeOrderReq("BuyerBeta", "RACE-B-" + randomUUID().substring(0, 4));
+
+    // Execute concurrently
+    const [resA, resB] = await Promise.all([
+      handleHttpRequest(reqA),
+      handleHttpRequest(reqB),
+    ]);
+
+    const statuses = [resA.status, resB.status];
+    expect(statuses).toContain(201);
+    expect(statuses).toContain(422);
+
+    // Remaining stock must be precisely 0 (never negative, zero overselling)
+    const stockRow = db.query<any, { $sku: string }>(
+      "SELECT stock_qty FROM catalog_items WHERE sku = $sku"
+    ).get({ $sku: scarceSku });
+    expect(stockRow?.stock_qty).toBe(0);
+  });
+});
+
+describe("18. Test Database Isolation & Zero Production Touch", () => {
+  it("should ensure tests operate on an isolated test database and do not touch bos.db", () => {
+    // Verify current test database filename
+    expect(db.filename).toContain("test_bos.db");
+    expect(db.filename).not.toMatch(/[/\\]bos\.db$/);
   });
 });
 
