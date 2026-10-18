@@ -876,15 +876,15 @@
                 <pre class="text-slate-200 leading-snug">${escapeHtml(JSON.stringify(action.proposed_payload, null, 2))}</pre>
               </div>
 
-              <!-- Action Buttons -->
+              <!-- Action Buttons (Safe Event Delegation via data-action) -->
               <div class="flex items-center justify-end gap-2 pt-1 border-t border-white/5">
-                <button onclick="rejectAction('${escapeHtml(action.id)}')" class="px-3 py-1.5 rounded-lg hover:bg-rose-500/10 text-rose-400 hover:border-rose-500/30 border border-transparent text-xs font-medium transition">
+                <button data-action="reject-action" data-id="${escapeHtml(action.id)}" class="px-3 py-1.5 rounded-lg hover:bg-rose-500/10 text-rose-400 hover:border-rose-500/30 border border-transparent text-xs font-medium transition">
                   Reject
                 </button>
-                <button onclick="editActionPrompt('${escapeHtml(action.id)}')" class="px-3 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-300 text-xs font-medium border border-white/5 transition">
+                <button data-action="edit-action" data-id="${escapeHtml(action.id)}" class="px-3 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-300 text-xs font-medium border border-white/5 transition">
                   Edit Payload
                 </button>
-                <button onclick="approveAction('${escapeHtml(action.id)}')" class="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-lg shadow-emerald-600/20 transition flex items-center gap-1.5">
+                <button data-action="approve-action" data-id="${escapeHtml(action.id)}" class="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-lg shadow-emerald-600/20 transition flex items-center gap-1.5">
                   <i data-lucide="check" class="w-3.5 h-3.5"></i> Approve & Execute
                 </button>
               </div>
@@ -1017,7 +1017,7 @@
                 </div>
                 <div class="space-y-2 min-h-[300px]">
                   ${items.map(item => `
-                    <div onclick="open360Drawer('${escapeHtml(item.entity_id || item.supplier_entity_id || 'ent_apex')}')" class="p-3 rounded-lg bg-surface-850 hover:bg-surface-800 border border-white/5 hover:border-brand-500/30 transition cursor-pointer space-y-2">
+                    <div data-action="open-360" data-entity-id="${escapeHtml(item.entity_id || item.supplier_entity_id || 'ent_apex')}" class="p-3 rounded-lg bg-surface-850 hover:bg-surface-800 border border-white/5 hover:border-brand-500/30 transition cursor-pointer space-y-2">
                       <div class="flex items-start justify-between">
                         <span class="text-xs font-semibold text-white">${escapeHtml(item.title || item.name || item.sku)}</span>
                         ${item.amount ? `<span class="text-xs font-mono text-emerald-400">$${item.amount.toLocaleString()}</span>` : ''}
@@ -1063,7 +1063,7 @@
                     ${item.amount !== undefined ? `$${item.amount.toLocaleString()}` : (item.stock_qty !== undefined ? `${item.stock_qty} in stock` : '—')}
                   </td>
                   <td class="py-2.5 px-4 text-right">
-                    <button onclick="open360Drawer('${escapeHtml(item.entity_id || item.supplier_entity_id || 'ent_apex')}')" class="p-1 rounded hover:bg-surface-800 text-brand-400">
+                    <button data-action="open-360" data-entity-id="${escapeHtml(item.entity_id || item.supplier_entity_id || 'ent_apex')}" class="p-1 rounded hover:bg-surface-800 text-brand-400">
                       <i data-lucide="eye" class="w-4 h-4"></i>
                     </button>
                   </td>
@@ -1286,7 +1286,7 @@
               <span class="text-[10px] text-slate-400 font-mono">Risk: ${escapeHtml(p.risk_level)}</span>
             </div>
             <label class="relative inline-flex items-center cursor-pointer">
-              <input type="checkbox" onchange="toggleHitlPolicy('${escapeHtml(p.tool_name)}', this.checked)" ${p.requires_hitl ? 'checked' : ''} class="sr-only peer">
+              <input type="checkbox" data-action="toggle-hitl" data-tool="${escapeHtml(p.tool_name)}" ${p.requires_hitl ? 'checked' : ''} class="sr-only peer">
               <div class="w-8 h-4 bg-surface-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-600"></div>
             </label>
           </div>
@@ -1327,7 +1327,7 @@
             <td class="py-2 px-3 text-slate-400">${new Date(l.created_at).toLocaleTimeString()}</td>
             <td class="py-2 px-3 text-right">
               ${!l.is_reverted && l.action !== 'ROLLBACK' && l.table_name !== 'ledger_entries' ? `
-                <button onclick="rollbackAudit('${escapeHtml(l.id)}')" class="px-2 py-0.5 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-[10px] transition">
+                <button data-action="rollback-audit" data-id="${escapeHtml(l.id)}" class="px-2 py-0.5 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-[10px] transition">
                   Undo Action
                 </button>
               ` : '<span class="text-slate-400 text-[10px]">' + (l.is_reverted ? 'Reverted' : 'Protected') + '</span>'}
@@ -1401,6 +1401,37 @@
       document.body.appendChild(toast);
       setTimeout(() => toast.remove(), 4000);
     }
+
+    // ------------------------------------------------------------------
+    // Centralized DOM Event Delegation (Zero Inline Code Execution Contexts)
+    // ------------------------------------------------------------------
+    document.addEventListener('click', (e) => {
+      const actionEl = e.target.closest('[data-action]');
+      if (!actionEl) return;
+      const action = actionEl.getAttribute('data-action');
+      const id = actionEl.getAttribute('data-id');
+      const entityId = actionEl.getAttribute('data-entity-id');
+
+      if (action === 'approve-action' && id) {
+        approveAction(id);
+      } else if (action === 'reject-action' && id) {
+        rejectAction(id);
+      } else if (action === 'edit-action' && id) {
+        editActionPrompt(id);
+      } else if (action === 'open-360' && entityId) {
+        open360Drawer(entityId);
+      } else if (action === 'rollback-audit' && id) {
+        rollbackAudit(id);
+      }
+    });
+
+    document.addEventListener('change', (e) => {
+      const target = e.target.closest('[data-action="toggle-hitl"]');
+      if (target) {
+        const tool = target.getAttribute('data-tool');
+        if (tool) toggleHitlPolicy(tool, target.checked);
+      }
+    });
   </script>
 </body>
 </html>
