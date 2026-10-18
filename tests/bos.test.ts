@@ -30,9 +30,10 @@ import {
   handleHttpRequest,
   runMigrations,
   RateLimiter,
+  ORDER_WEBHOOK_SECRET,
 } from "../server";
 
-const TEST_WEBHOOK_SECRET = process.env.ORDER_WEBHOOK_SECRET || process.env.BOS_WEBHOOK_SECRET || "bos_sec_webhook_9921b";
+const TEST_WEBHOOK_SECRET = ORDER_WEBHOOK_SECRET;
 
 // Helper: Escape HTML function mirror for testing
 function escapeHtml(str: string): string {
@@ -582,3 +583,163 @@ describe("10. XSS Protection & Dynamic DOM Event Delegation Invariants", () => {
     // Proves that when extracted with element.getAttribute('data-id'), it remains a pure string parameter
   });
 });
+
+describe("11. Webhook Concurrency & Idempotency Invariants", () => {
+  it("should handle duplicate or concurrent order submissions idempotently without double accounting or stock deductions", async () => {
+    const orderNumber = "CONCUR-" + randomUUID().substring(0, 6);
+    const orderPayload = JSON.stringify({
+      customer_name: "Concurrency Tester",
+      customer_email: "concurrency@test.io",
+      order_number: orderNumber,
+      total_amount: 500,
+      items: [{ sku: "cat_bos_cloud", quantity: 1 }],
+    });
+
+    const sig = createHmac("sha256", TEST_WEBHOOK_SECRET).update(orderPayload).digest("hex");
+
+    const req1 = new Request("http://localhost:8080/api/webhooks/order", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Signature": sig },
+      body: orderPayload,
+    });
+    const res1 = await handleHttpRequest(req1);
+    expect(res1.status).toBe(201);
+    const json1 = await res1.json();
+    expect(json1.success).toBe(true);
+
+    // Second request with exact same order number
+    const req2 = new Request("http://localhost:8080/api/webhooks/order", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Signature": sig },
+      body: orderPayload,
+    });
+    const res2 = await handleHttpRequest(req2);
+    expect(res2.status).toBe(200);
+    const json2 = await res2.json();
+    expect(json2.idempotent_replay).toBe(true);
+
+    // Verify only 1 pipeline_states record exists
+    const orders = db.query<any, { $id: string }>(
+      "SELECT count(*) as count FROM pipeline_states WHERE id = $id"
+    ).get({ $id: "pip_ord_" + orderNumber });
+    expect(orders?.count).toBe(1);
+
+    // Verify ledger entries were only posted once (1 debit cash, 1 credit revenue)
+    const ledgerEntries = db.query<any, { $ref: string }>(
+      "SELECT count(*) as count FROM ledger_entries WHERE reference_id = $ref"
+    ).get({ $ref: "pip_ord_" + orderNumber });
+    expect(ledgerEntries?.count).toBe(2);
+  });
+});
+
+describe("12. Inventory Stock Validation & Overselling Prevention", () => {
+  it("should reject orders that exceed available physical stock with 422 Unprocessable Entity", async () => {
+    const itemBefore = db.query<any, { $sku: string }>(
+      "SELECT stock_qty FROM catalog_items WHERE sku = $sku"
+    ).get({ $sku: "HW-SRV-01" });
+    const currentStock = itemBefore?.stock_qty || 0;
+
+    // Request more than available
+    const excessiveQuantity = currentStock + 50;
+    const orderNumber = "OVER-" + randomUUID().substring(0, 6);
+    const orderPayload = JSON.stringify({
+      customer_name: "Oversell Tester",
+      customer_email: "oversell@test.io",
+      order_number: orderNumber,
+      total_amount: 1850.0 * excessiveQuantity,
+      items: [{ sku: "HW-SRV-01", quantity: excessiveQuantity }],
+    });
+
+    const sig = createHmac("sha256", TEST_WEBHOOK_SECRET).update(orderPayload).digest("hex");
+    const req = new Request("http://localhost:8080/api/webhooks/order", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Signature": sig },
+      body: orderPayload,
+    });
+
+    const res = await handleHttpRequest(req);
+    expect(res.status).toBe(422);
+
+    const json = await res.json();
+    expect(json.code).toBe("INSUFFICIENT_STOCK");
+    expect(json.available_stock).toBe(currentStock);
+    expect(json.requested_quantity).toBe(excessiveQuantity);
+
+    // Stock must be completely unchanged in the database
+    const itemAfter = db.query<any, { $sku: string }>(
+      "SELECT stock_qty FROM catalog_items WHERE sku = $sku"
+    ).get({ $sku: "HW-SRV-01" });
+    expect(itemAfter?.stock_qty).toBe(currentStock);
+
+    // Order state machine must NOT have been inserted
+    const orderRow = db.query<any, { $id: string }>(
+      "SELECT * FROM pipeline_states WHERE id = $id"
+    ).get({ $id: "pip_ord_" + orderNumber });
+    expect(orderRow).toBeNull();
+  });
+
+  it("should atomically deduct stock and post balanced ledger when items are in stock", async () => {
+    const itemBefore = db.query<any, { $sku: string }>(
+      "SELECT stock_qty FROM catalog_items WHERE sku = $sku"
+    ).get({ $sku: "HW-IOT-99" });
+    const stockBefore = itemBefore?.stock_qty || 10;
+    expect(stockBefore).toBeGreaterThan(0);
+
+    const orderNumber = "VALID-" + randomUUID().substring(0, 6);
+    const orderPayload = JSON.stringify({
+      customer_name: "Valid Buyer",
+      customer_email: "valid@test.io",
+      order_number: orderNumber,
+      total_amount: 240.0,
+      items: [{ sku: "HW-IOT-99", quantity: 1 }],
+    });
+
+    const sig = createHmac("sha256", TEST_WEBHOOK_SECRET).update(orderPayload).digest("hex");
+    const req = new Request("http://localhost:8080/api/webhooks/order", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Signature": sig },
+      body: orderPayload,
+    });
+
+    const res = await handleHttpRequest(req);
+    expect(res.status).toBe(201);
+    const json = await res.json();
+    expect(json.success).toBe(true);
+
+    // Verify stock is decremented exactly by 1
+    const itemAfter = db.query<any, { $sku: string }>(
+      "SELECT stock_qty FROM catalog_items WHERE sku = $sku"
+    ).get({ $sku: "HW-IOT-99" });
+    expect(itemAfter?.stock_qty).toBe(stockBefore - 1);
+
+    // Verify balanced double-entry accounting
+    verifyTransactionGroupBalance(json.transaction_group_id, db);
+  });
+});
+
+describe("13. Durable SQLite-Backed Rate Limiting & Socket Protection", () => {
+  it("should record requests in SQLite rate_limits table and throttle after limit is reached", () => {
+    const testKey = "client_test_" + randomUUID().substring(0, 6);
+
+    const check1 = RateLimiter.check(testKey, 2);
+    expect(check1.allowed).toBe(true);
+    expect(check1.remaining).toBe(1);
+
+    const check2 = RateLimiter.check(testKey, 2);
+    expect(check2.allowed).toBe(true);
+    expect(check2.remaining).toBe(0);
+
+    // Third call should be throttled
+    const check3 = RateLimiter.check(testKey, 2);
+    expect(check3.allowed).toBe(false);
+    expect(check3.remaining).toBe(0);
+    expect(check3.retryAfterSec).toBeGreaterThan(0);
+
+    // Verify records exist in SQLite rate_limits table
+    const rows = db.query<any, { $key: string }>(
+      "SELECT count(*) as count FROM rate_limits WHERE client_key = $key"
+    ).get({ $key: testKey });
+    expect(rows?.count).toBe(2);
+  });
+});
+

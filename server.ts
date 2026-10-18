@@ -30,7 +30,19 @@ const DB_PATH = process.env.DATABASE_PATH || join(process.cwd(), "bos.db");
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const SCHEMA_FILE = join(process.cwd(), "schema.sql");
 const ALLOW_UNAUTHENTICATED_LOCAL = process.env.ALLOW_UNAUTHENTICATED_LOCAL === "true";
-const ORDER_WEBHOOK_SECRET = process.env.ORDER_WEBHOOK_SECRET || process.env.BOS_WEBHOOK_SECRET || "bos_sec_webhook_9921b";
+const TRUST_PROXY = process.env.TRUST_PROXY === "true";
+
+// Webhook Secret Security: Require strong secret in production; fail startup if missing.
+const envWebhookSecret = process.env.ORDER_WEBHOOK_SECRET || process.env.BOS_WEBHOOK_SECRET;
+if (!envWebhookSecret && process.env.NODE_ENV === "production") {
+  throw new Error("FATAL CONFIGURATION ERROR: ORDER_WEBHOOK_SECRET or BOS_WEBHOOK_SECRET must be set in production environment. Server startup aborted.");
+}
+export const ORDER_WEBHOOK_SECRET = envWebhookSecret || (process.env.NODE_ENV === "test" ? "bos_test_webhook_sec_temp" : randomBytes(32).toString("hex"));
+
+if (!envWebhookSecret && process.env.NODE_ENV !== "test") {
+  console.warn("⚠️ [SECURITY WARNING] No ORDER_WEBHOOK_SECRET configured. An ephemeral cryptographically secure secret has been generated for this session.");
+}
+
 const MAX_BODY_BYTES = 512 * 1024; // 512 KB
 
 export const db = new Database(DB_PATH, { create: true });
@@ -91,6 +103,23 @@ export function runMigrations(targetDb: Database = db) {
       console.log("[BOS Migration] Applied Migration 1 (Ledger Immutability Triggers)");
     } catch (err: any) {
       console.warn("[BOS Migration] Migration 1 notice:", err.message);
+    }
+  }
+
+  // Migration 2: Durable SQLite-backed Rate Limiting table
+  if (!applied.has(2)) {
+    try {
+      targetDb.exec(`
+        CREATE TABLE IF NOT EXISTS rate_limits (
+          client_key TEXT NOT NULL,
+          timestamp INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_rate_limits_key_ts ON rate_limits(client_key, timestamp);
+      `);
+      targetDb.query("INSERT OR REPLACE INTO schema_migrations (version, name) VALUES (2, 'rate_limits_table')").run();
+      console.log("[BOS Migration] Applied Migration 2 (Persistent Rate Limits Table)");
+    } catch (err: any) {
+      console.warn("[BOS Migration] Migration 2 notice:", err.message);
     }
   }
 }
@@ -211,32 +240,88 @@ export interface AgentTokenRow {
 }
 
 // --------------------------------------------------------------------
-// In-Memory Sliding-Window Rate Limiter
+// Durable SQLite-Backed Sliding-Window Rate Limiter
 // --------------------------------------------------------------------
 export class RateLimiter {
-  private static clientWindows = new Map<string, number[]>();
-
-  static check(key: string, limitPerMinute: number = 120): { allowed: boolean; remaining: number; retryAfterSec: number } {
+  static check(key: string, limitPerMinute: number = 120, targetDb: Database = db): { allowed: boolean; remaining: number; retryAfterSec: number } {
     const now = Date.now();
     const windowStart = now - 60_000;
-    let timestamps = this.clientWindows.get(key) || [];
-    timestamps = timestamps.filter(t => t > windowStart);
 
-    if (timestamps.length >= limitPerMinute) {
-      this.clientWindows.set(key, timestamps);
-      const oldestInWindow = timestamps[0] || now;
-      const retryAfterSec = Math.max(1, Math.ceil((oldestInWindow + 60_000 - now) / 1000));
-      return { allowed: false, remaining: 0, retryAfterSec };
+    try {
+      const tx = targetDb.transaction(() => {
+        // Prune entries older than 1 minute for this client key
+        targetDb.query("DELETE FROM rate_limits WHERE client_key = $key AND timestamp < $cutoff").run({
+          $key: key,
+          $cutoff: windowStart,
+        });
+
+        const countRow = targetDb.query<{ count: number }, { $key: string; $cutoff: number }>(
+          "SELECT count(*) as count FROM rate_limits WHERE client_key = $key AND timestamp >= $cutoff"
+        ).get({ $key: key, $cutoff: windowStart });
+
+        const currentCount = countRow?.count || 0;
+
+        if (currentCount >= limitPerMinute) {
+          const oldestRow = targetDb.query<{ timestamp: number }, { $key: string }>(
+            "SELECT timestamp FROM rate_limits WHERE client_key = $key ORDER BY timestamp ASC LIMIT 1"
+          ).get({ $key: key });
+          const oldest = oldestRow?.timestamp || now;
+          const retryAfterSec = Math.max(1, Math.ceil((oldest + 60_000 - now) / 1000));
+          return { allowed: false, remaining: 0, retryAfterSec };
+        }
+
+        targetDb.query("INSERT INTO rate_limits (client_key, timestamp) VALUES ($key, $now)").run({
+          $key: key,
+          $now: now,
+        });
+
+        return { allowed: true, remaining: limitPerMinute - (currentCount + 1), retryAfterSec: 0 };
+      });
+
+      return tx();
+    } catch {
+      // Graceful fallback to allowed if table is being initialized
+      return { allowed: true, remaining: 1, retryAfterSec: 0 };
     }
-
-    timestamps.push(now);
-    this.clientWindows.set(key, timestamps);
-    return { allowed: true, remaining: limitPerMinute - timestamps.length, retryAfterSec: 0 };
   }
 
-  static reset() {
-    this.clientWindows.clear();
+  static reset(targetDb: Database = db) {
+    try {
+      targetDb.exec("DELETE FROM rate_limits;");
+    } catch {
+      // ignore
+    }
   }
+}
+
+// --------------------------------------------------------------------
+// Secure Client IP Resolution (Preventing Header Spoofing)
+// --------------------------------------------------------------------
+export function getClientIp(req: Request, server?: any): string {
+  // Only honor forwarding headers if explicitly configured behind a trusted proxy
+  if (TRUST_PROXY) {
+    const forwarded = req.headers.get("x-forwarded-for");
+    if (forwarded) {
+      const firstIp = forwarded.split(",")[0].trim();
+      if (firstIp) return firstIp;
+    }
+    const realIp = req.headers.get("x-real-ip");
+    if (realIp) return realIp.trim();
+  }
+
+  // Directly extract socket address from runtime server when available
+  if (server && typeof server.requestIP === "function") {
+    try {
+      const socket = server.requestIP(req);
+      if (socket && socket.address) {
+        return socket.address;
+      }
+    } catch {
+      // fallback
+    }
+  }
+
+  return "direct_socket_client";
 }
 
 // --------------------------------------------------------------------
@@ -1287,9 +1372,9 @@ export class BusinessCoreService {
       case "erp_draft_purchase_order":
         return this.erpDraftPurchaseOrder(args.sku, args.quantity, args.supplier_id, actorId, bypassHitl);
       case "erp_receive_purchase_order":
-        return this.erpReceivePurchaseOrder(args.po_id, actorId);
+        return this.erpReceivePurchaseOrder(args.po_id, args.received_qty || args.receivedQty, actorId);
       case "finance_issue_invoice":
-        return this.financeIssueInvoice(args.customer_id || args.customerId, args.amount, args.description, args.tax_amount || args.taxAmount || 0, actorId, bypassHitl);
+        return this.financeIssueInvoice(args.customer_id || args.customerId, args.amount, args.description, args.tax_amount || args.taxAmount || 0, args.currency || "USD", actorId, bypassHitl);
       case "hrms_stage_payroll_run":
         return this.hrmsStagePayrollRun(args.batch_period || args.batchPeriod || "2026-11", actorId, bypassHitl);
       case "presence_publish_review_reply":
@@ -1671,7 +1756,7 @@ function jsonResponse(data: any, status: number = 200, extraHeaders: Record<stri
   });
 }
 
-export async function handleHttpRequest(req: Request): Promise<Response> {
+export async function handleHttpRequest(req: Request, server?: any): Promise<Response> {
   const url = new URL(req.url);
   const path = url.pathname;
   const method = req.method;
@@ -1779,8 +1864,8 @@ export async function handleHttpRequest(req: Request): Promise<Response> {
   // Public / Webhook Ingestion Routes (Signed & Rate-Limited)
   // --------------------------------------------------------------
   if (path === "/api/webhooks/order" && method === "POST") {
-    // Rate limit webhooks: 60 calls/minute per client IP
-    const clientIp = req.headers.get("x-forwarded-for") || "webhook_client";
+    // Rate limit webhooks: 60 calls/minute per client IP (socket address or trusted proxy)
+    const clientIp = getClientIp(req, server);
     const rl = RateLimiter.check(`webhook:${clientIp}`, 60);
     if (!rl.allowed) {
       return jsonResponse({ error: "Webhook rate limit exceeded. Please retry later." }, 429, { "Retry-After": String(rl.retryAfterSec) });
@@ -1826,24 +1911,89 @@ export async function handleHttpRequest(req: Request): Promise<Response> {
     const externalOrderNum = order.order_number ? String(order.order_number) : "WEB-" + randomUUID().substring(0, 6);
     const orderPipelineId = "pip_ord_" + externalOrderNum;
 
-    // Idempotency check: prevent duplicate billing or stock deduction
-    const existingOrder = db.query<PipelineState, { $id: string }>(
-      "SELECT * FROM pipeline_states WHERE id = $id"
-    ).get({ $id: orderPipelineId });
+    type IngestResult = 
+      | { success: true; idempotent_replay: true; order_id: string; status: string; message: string }
+      | { success: true; order_id: string; transaction_group_id: string }
+      | { error: string; status: number; code?: string; sku?: string; available_stock?: number; requested_quantity?: number };
 
-    if (existingOrder) {
-      return jsonResponse({
-        idempotent_replay: true,
-        order_id: existingOrder.id,
-        status: existingOrder.stage,
-        message: "Order already ingested previously.",
-      });
-    }
+    // Atomic idempotency claim, stock availability verification, inventory deduction, customer association and ledger journal
+    const executeOrderIngest = db.transaction((): IngestResult => {
+      // 1. Atomic Idempotency Check within the database transaction boundary
+      const existingOrder = db.query<PipelineState, { $id: string }>(
+        "SELECT * FROM pipeline_states WHERE id = $id"
+      ).get({ $id: orderPipelineId });
 
-    let customerId = "";
-    let txGroup = "";
+      if (existingOrder) {
+        return {
+          success: true,
+          idempotent_replay: true,
+          order_id: existingOrder.id,
+          status: existingOrder.stage,
+          message: "Order already ingested previously.",
+        };
+      }
 
-    const executeOrderIngest = db.transaction(() => {
+      // 2. Inventory Availability Validation (Prevent Silent Overselling)
+      if (order.items && Array.isArray(order.items)) {
+        for (const item of order.items) {
+          if (!item.sku || !Number.isFinite(item.quantity) || item.quantity <= 0) {
+            return {
+              error: `Invalid line item: each item must specify a valid 'sku' and positive finite 'quantity'.`,
+              status: 400,
+              code: "INVALID_ITEM",
+            };
+          }
+
+          const catItem = db.query<CatalogItem, { $sku: string }>(
+            "SELECT * FROM catalog_items WHERE sku = $sku"
+          ).get({ $sku: item.sku });
+
+          if (!catItem) {
+            return {
+              error: `Item with SKU '${item.sku}' not found in catalog.`,
+              status: 422,
+              code: "ITEM_NOT_FOUND",
+              sku: item.sku,
+            };
+          }
+
+          if (catItem.type === "physical" && catItem.stock_qty < item.quantity) {
+            return {
+              error: `Insufficient inventory for SKU '${item.sku}': Requested ${item.quantity}, but only ${catItem.stock_qty} available in stock.`,
+              status: 422,
+              code: "INSUFFICIENT_STOCK",
+              sku: item.sku,
+              available_stock: catItem.stock_qty,
+              requested_quantity: item.quantity,
+            };
+          }
+        }
+      }
+
+      // 3. Atomically Deduct Inventory (Enforcing stock_qty >= quantity)
+      if (order.items && Array.isArray(order.items)) {
+        for (const item of order.items) {
+          const updateRes = db.query(`
+            UPDATE catalog_items
+            SET stock_qty = stock_qty - $qty, updated_at = CURRENT_TIMESTAMP
+            WHERE sku = $sku AND stock_qty >= $qty
+          `).run({
+            $qty: item.quantity,
+            $sku: item.sku,
+          });
+
+          const catItem = db.query<CatalogItem, { $sku: string }>(
+            "SELECT type FROM catalog_items WHERE sku = $sku"
+          ).get({ $sku: item.sku });
+
+          if (catItem && catItem.type === "physical" && updateRes.changes === 0) {
+            throw new Error(`Concurrent inventory contention for SKU '${item.sku}'. Order aborted to prevent overselling.`);
+          }
+        }
+      }
+
+      // 4. Customer Entity Verification / Creation
+      let customerId = "";
       let customer = db.query<Entity, { $email: string }>("SELECT * FROM entities WHERE email = $email").get({ $email: order.customer_email });
       if (!customer) {
         const newCustId = "ent_cust_" + randomUUID().substring(0, 8);
@@ -1861,6 +2011,7 @@ export async function handleHttpRequest(req: Request): Promise<Response> {
         customerId = customer.id;
       }
 
+      // 5. Insert Sales Order State Machine Record
       db.query(`
         INSERT INTO pipeline_states (id, category, title, stage, entity_id, amount, payload_json)
         VALUES ($id, 'sales_order', $title, 'paid', $entity_id, $amount, $payload)
@@ -1872,7 +2023,8 @@ export async function handleHttpRequest(req: Request): Promise<Response> {
         $payload: JSON.stringify(order),
       });
 
-      txGroup = "tx_grp_ecom_" + randomUUID().substring(0, 8);
+      // 6. Strict Double-Entry Ledger Posting
+      const txGroup = "tx_grp_ecom_" + randomUUID().substring(0, 8);
       LedgerManager.postTransaction(txGroup, [
         {
           type: "debit",
@@ -1894,22 +2046,45 @@ export async function handleHttpRequest(req: Request): Promise<Response> {
         }
       ], db);
 
-      if (order.items && Array.isArray(order.items)) {
-        for (const item of order.items) {
-          if (item.sku && Number.isFinite(item.quantity) && item.quantity > 0) {
-            db.query("UPDATE catalog_items SET stock_qty = MAX(0, stock_qty - $qty), updated_at = CURRENT_TIMESTAMP WHERE sku = $sku").run({
-              $qty: item.quantity,
-              $sku: item.sku,
-            });
-          }
+      // 7. Audit Logging
+      AuditEngine.record("system", "ecom_webhook", "webhook_order_ingest", "pipeline_states", orderPipelineId, "INSERT", null, order);
+
+      return { success: true, order_id: orderPipelineId, transaction_group_id: txGroup };
+    });
+
+    try {
+      const result = executeOrderIngest();
+      if ("error" in result) {
+        return jsonResponse(result, result.status || 422);
+      }
+      if ("idempotent_replay" in result && result.idempotent_replay) {
+        return jsonResponse(result, 200);
+      }
+      return jsonResponse({ success: true, order_id: result.order_id, transaction_group_id: result.transaction_group_id }, 201);
+    } catch (err: any) {
+      // Graceful handling of concurrent race collisions on the primary key constraint
+      if (err.message && err.message.includes("UNIQUE constraint failed")) {
+        const existing = db.query<PipelineState, { $id: string }>(
+          "SELECT * FROM pipeline_states WHERE id = $id"
+        ).get({ $id: orderPipelineId });
+
+        if (existing) {
+          return jsonResponse({
+            idempotent_replay: true,
+            order_id: existing.id,
+            status: existing.stage,
+            message: "Order already ingested previously (concurrent duplicate handled).",
+          }, 200);
         }
       }
 
-      AuditEngine.record("system", "ecom_webhook", "webhook_order_ingest", "pipeline_states", orderPipelineId, "INSERT", null, order);
-    });
+      // Re-raise or return 422 if inventory contention caused rollback
+      if (err.message && err.message.includes("Concurrent inventory contention")) {
+        return jsonResponse({ error: err.message, code: "INVENTORY_CONTENTION" }, 422);
+      }
 
-    executeOrderIngest();
-    return jsonResponse({ success: true, order_id: orderPipelineId, transaction_group_id: txGroup }, 201);
+      return jsonResponse({ error: "Failed to process order webhook: " + err.message }, 500);
+    }
   }
 
   // --------------------------------------------------------------
@@ -2263,7 +2438,9 @@ export async function handleHttpRequest(req: Request): Promise<Response> {
 export function startHttpServer() {
   Bun.serve({
     port: PORT,
-    fetch: handleHttpRequest,
+    fetch(req: Request, server: any) {
+      return handleHttpRequest(req, server);
+    },
   });
 
   console.log(`[BOS Server] HTTP & MCP Server online at http://localhost:${PORT}`);

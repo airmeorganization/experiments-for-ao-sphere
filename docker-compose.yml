@@ -13,6 +13,8 @@ services:
       - PORT=8080
       - DATABASE_PATH=/data/bos.db
       - NODE_ENV=production
+      - ORDER_WEBHOOK_SECRET=${ORDER_WEBHOOK_SECRET:-}
+      - TRUST_PROXY=${TRUST_PROXY:-false}
     volumes:
       # Single-file SQLite WAL persistence
       - ./data:/data

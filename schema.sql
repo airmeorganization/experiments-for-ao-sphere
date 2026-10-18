@@ -218,6 +218,13 @@ CREATE TABLE IF NOT EXISTS hitl_policies (
     auto_approve_threshold REAL DEFAULT NULL
 );
 
+-- Durable Rate Limiting Store
+CREATE TABLE IF NOT EXISTS rate_limits (
+    client_key TEXT NOT NULL,
+    timestamp INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rate_limits_key_ts ON rate_limits(client_key, timestamp);
+
 -- ====================================================================
 -- IMMUTABLE LEDGER & WORKFLOW TRIGGERS
 -- ====================================================================
